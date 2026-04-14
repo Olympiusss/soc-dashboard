@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sentrium Integrated SOC Dashboard</title>
+    <meta name="description" content="Real-time Security Operations Center dashboard integrating SentinelOne and AlienVault">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=2">
+    <!-- ApexCharts CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.49.0/dist/apexcharts.min.js"></script>
+</head>
+<body>
+    <!-- ═══ LEFT SIDEBAR ═══ -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-logo">
+            <div class="logo-icon-box">
+                <img src="/static/img/logo.png" alt="Sentrium Security">
+            </div>
+        </div>
+
+        <div class="sidebar-search">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+            </svg>
+            <input type="text" placeholder="Search" id="sidebar-search-input">
+        </div>
+
+        <nav class="sidebar-nav">
+            <a href="#" class="nav-item active" data-page="dashboard">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                <span>Dashboard</span>
+            </a>
+            <a href="#" class="nav-item" data-page="threat-intel">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+                <span>Threat Intel</span>
+            </a>
+            <a href="#" class="nav-item" data-page="alerts">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <span>Alerts</span>
+            </a>
+            <a href="#" class="nav-item" data-page="monitoring">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                <span>Monitoring</span>
+            </a>
+            <a href="#" class="nav-item" data-page="reports">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                <span>Reports</span>
+            </a>
+            <a href="#" class="nav-item" data-page="settings">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                <span>Settings</span>
+            </a>
+        </nav>
+    </aside>
+
+    <!-- ═══ MAIN CONTENT ═══ -->
+    <main class="main-content">
+        <!-- ── Top Bar ── -->
+        <header class="topbar">
+            <div class="topbar-left" style="display:flex;align-items:center;gap:16px;">
+                <a href="/" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:1px solid rgba(0,0,0,0.08);background:#fff;text-decoration:none;color:#6B7280;transition:all 0.2s;" onmouseover="this.style.borderColor='#3B82F6';this.style.color='#3B82F6'" onmouseout="this.style.borderColor='rgba(0,0,0,0.08)';this.style.color='#6B7280'">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><polyline points="15 18 9 12 15 6"/></svg>
+                </a>
+                <div>
+                    <h1 class="page-title">{{ client_name }}</h1>
+                    <p class="page-subtitle">Security Operations Center — Client Dashboard</p>
+                </div>
+            </div>
+            <div class="topbar-right">
+                <div class="system-status" id="system-status">
+                    <span class="status-dot"></span>
+                    <span class="status-text">All System Operational</span>
+                </div>
+
+                <button class="topbar-icon-btn" id="notification-btn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+                    <span class="notif-badge" id="notif-count">0</span>
+                </button>
+                <a href="/logout" class="topbar-icon-btn user-btn" title="Sign Out">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                </a>
+            </div>
+        </header>
+
+        <!-- ── KPI Cards ── -->
+        <section class="kpi-row" id="kpi-row">
+            <div class="kpi-card" id="kpi-blocked">
+                <div class="kpi-content">
+                    <span class="kpi-value" data-target="0">0</span>
+                    <span class="kpi-label">BLOCKED ATTEMPTS</span>
+                </div>
+                <div class="kpi-icon kpi-icon-green">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
+                </div>
+            </div>
+            <div class="kpi-card" id="kpi-alerts">
+                <div class="kpi-content">
+                    <span class="kpi-value" data-target="0">0</span>
+                    <span class="kpi-label">ALERTS GENERATED</span>
+                </div>
+                <div class="kpi-icon kpi-icon-orange">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                </div>
+            </div>
+            <div class="kpi-card" id="kpi-events">
+                <div class="kpi-content">
+                    <span class="kpi-value" data-target="0">0</span>
+                    <span class="kpi-label">EVENTS PROCESSED</span>
+                </div>
+                <div class="kpi-icon kpi-icon-blue">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+                </div>
+            </div>
+            <div class="kpi-card" id="kpi-dfir">
+                <div class="kpi-content">
+                    <span class="kpi-value" data-target="0">0</span>
+                    <span class="kpi-label">DFIR CASES</span>
+                </div>
+                <div class="kpi-icon kpi-icon-purple">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                </div>
+            </div>
+            <div class="kpi-card" id="kpi-sectors">
+                <div class="kpi-content">
+                    <span class="kpi-value" data-target="0">0</span>
+                    <span class="kpi-label">SECTORS AFFECTED</span>
+                </div>
+                <div class="kpi-icon kpi-icon-teal">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+                </div>
+            </div>
+        </section>
+
+        <!-- ── Charts Row ── -->
+        <section class="charts-row">
+            <div class="chart-card chart-card-wide">
+                <div class="chart-header">
+                    <h2>Event Activity</h2>
+                    <div class="chart-legend">
+                        <span class="legend-item"><span class="legend-dot" style="background:#3B82F6"></span> Total Events</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#F97316"></span> Blocked</span>
+                    </div>
+                </div>
+                <div id="event-chart" class="chart-body"></div>
+            </div>
+            <div class="chart-card chart-card-narrow">
+                <div class="chart-header">
+                    <h2>EDR Telemetry Detection</h2>
+                    <p class="chart-subtitle">Reputation and Behavioral Analysis</p>
+                </div>
+                <div id="edr-chart" class="chart-body"></div>
+            </div>
+        </section>
+
+        <!-- ── Threats Table ── -->
+        <section class="alerts-section">
+            <div class="alerts-card">
+                <div class="alerts-header">
+                    <h2>Threats <span style="font-size:0.8rem;font-weight:600;color:var(--text-muted)">(Last 24 Hours)</span></h2>
+                    <span class="active-badge" id="active-count">0 Active</span>
+                </div>
+                <div class="alerts-table-wrapper">
+                    <table class="alerts-table" id="alerts-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>THREAT DETAILS</th>
+                                <th>AI CONFIDENCE</th>
+                                <th>ANALYST VERDICT</th>
+                                <th>INCIDENT STATUS</th>
+                                <th>ENDPOINT</th>
+                                <th>REPORTED TIME</th>
+                            </tr>
+                        </thead>
+                        <tbody id="alerts-tbody">
+                            <tr class="empty-row">
+                                <td colspan="7">Waiting for data...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ── Live Indicator ── -->
+        <div class="live-indicator" id="live-indicator">
+            <span class="live-pulse"></span>
+            <span class="live-text">Last updated: <span id="last-updated">connecting...</span></span>
+        </div>
+    </main>
+
+    <!-- ═══ RIGHT ACCENT STRIP ═══ -->
+    <aside class="right-strip">
+        <div class="strip-text">
+            <span>Sentrium Security</span>
+            <span class="strip-year">SOC Dashboard</span>
+        </div>
+    </aside>
+
+    <!-- ═══ Reconnecting Overlay ═══ -->
+    <div class="reconnect-overlay" id="reconnect-overlay">
+        <div class="reconnect-box">
+            <div class="reconnect-spinner"></div>
+            <p>Reconnecting to server...</p>
+        </div>
+    </div>
+
+    <script>
+        const WS_URL = "{{ ws_url }}";
+        const REFRESH_INTERVAL = {{ refresh_interval }};
+        const CLIENT_NAME = "{{ client_name }}";
+    </script>
+    <script src="/static/js/charts.js?v=2"></script>
+    <script src="/static/js/dashboard.js?v=2"></script>
+</body>
+</html>

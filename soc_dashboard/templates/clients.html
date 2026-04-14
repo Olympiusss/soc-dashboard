@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sentrium Integrated SOC Dashboard — Clients</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+    <style>
+        /* ── Client Grid Specific Styles ── */
+        .clients-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            padding: 0;
+            width: 100%;
+        }
+
+        @media (max-width: 1400px) {
+            .clients-grid { grid-template-columns: repeat(3, 1fr); }
+        }
+        @media (max-width: 1100px) {
+            .clients-grid { grid-template-columns: repeat(2, 1fr); }
+            .summary-row { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 768px) {
+            .clients-grid { grid-template-columns: 1fr; }
+            .summary-row { grid-template-columns: 1fr; }
+        }
+
+        .client-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-card);
+            border-radius: var(--radius-lg);
+            padding: 24px;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            text-decoration: none;
+            color: inherit;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            position: relative;
+            overflow: hidden;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .client-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, var(--accent-dark), var(--accent-blue));
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .client-card:hover {
+            transform: translateY(-6px);
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.12);
+            border-color: rgba(59, 130, 246, 0.3);
+        }
+
+        .client-card:hover::before { opacity: 1; }
+
+        .client-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .client-name {
+            font-size: 1.05rem;
+            font-weight: 800;
+            color: var(--text-primary);
+            letter-spacing: -0.3px;
+        }
+
+        .platform-badges {
+            display: flex;
+            gap: 6px;
+        }
+
+        .platform-badge {
+            padding: 3px 10px;
+            border-radius: 8px;
+            font-size: 0.65rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .badge-s1 {
+            background: rgba(139, 92, 246, 0.12);
+            color: #7C3AED;
+            border: 1px solid rgba(139, 92, 246, 0.2);
+        }
+
+        .badge-av {
+            background: rgba(6, 182, 212, 0.12);
+            color: #0891B2;
+            border: 1px solid rgba(6, 182, 212, 0.2);
+        }
+
+        .client-metrics {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+
+        .client-metric {
+            text-align: center;
+        }
+
+        .client-metric-value {
+            font-size: 1.35rem;
+            font-weight: 900;
+            color: var(--text-primary);
+            line-height: 1;
+        }
+
+        .client-metric-label {
+            font-size: 0.62rem;
+            font-weight: 700;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 4px;
+        }
+
+        .client-card-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-top: 12px;
+            border-top: 1px solid var(--border-light);
+        }
+
+        .client-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .client-status-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #22C55E;
+        }
+
+        .client-status-dot.warning { background: #F59E0B; }
+        .client-status-dot.critical { background: #EF4444; }
+
+        .view-btn {
+            font-size: 0.75rem;
+            font-weight: 700;
+            color: var(--accent-blue);
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .view-btn svg { width: 14px; height: 14px; }
+
+        /* ── Summary Row ── */
+        .summary-row {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-bottom: 28px;
+        }
+
+        .summary-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-card);
+            border-radius: var(--radius-lg);
+            padding: 20px 24px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .summary-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: var(--radius-md);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .summary-icon svg { width: 24px; height: 24px; }
+        .summary-icon.blue { background: rgba(59, 130, 246, 0.1); }
+        .summary-icon.blue svg { stroke: #2563EB; }
+        .summary-icon.purple { background: rgba(139, 92, 246, 0.1); }
+        .summary-icon.purple svg { stroke: #7C3AED; }
+        .summary-icon.orange { background: rgba(249, 115, 22, 0.1); }
+        .summary-icon.orange svg { stroke: #EA580C; }
+        .summary-icon.green { background: rgba(34, 197, 94, 0.1); }
+        .summary-icon.green svg { stroke: #16A34A; }
+
+        .summary-info { display: flex; flex-direction: column; gap: 2px; }
+        .summary-value { font-size: 1.6rem; font-weight: 900; color: var(--text-primary); line-height: 1; }
+        .summary-label { font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+
+        /* Grid Header */
+        .grid-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+        }
+
+        .grid-header h2 {
+            font-size: 1.1rem;
+            font-weight: 800;
+            color: var(--text-primary);
+        }
+
+        .grid-header .client-count {
+            font-size: 0.82rem;
+            font-weight: 700;
+            color: var(--text-muted);
+        }
+
+        /* Loading state */
+        .loading-state {
+            text-align: center;
+            padding: 80px 20px;
+            color: var(--text-muted);
+        }
+
+        .loading-spinner {
+            width: 48px; height: 48px;
+            border: 4px solid var(--border-light);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            margin: 0 auto 20px;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes fadeInCard {
+            from { opacity: 0; transform: translateY(16px) scale(0.97); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+
+        .client-card {
+            animation: fadeInCard 0.4s ease forwards;
+            opacity: 0;
+        }
+    </style>
+</head>
+<body>
+    <!-- ═══ LEFT SIDEBAR ═══ -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-logo">
+            <div class="logo-icon-box">
+                <img src="/static/img/logo.png" alt="Sentrium Security">
+            </div>
+        </div>
+
+        <div class="sidebar-search">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+            </svg>
+            <input type="text" placeholder="Search clients..." id="search-input">
+        </div>
+
+        <nav class="sidebar-nav">
+            <a href="/" class="nav-item active" data-page="dashboard">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                <span>Dashboard</span>
+            </a>
+            <a href="#" class="nav-item" data-page="threat-intel">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+                <span>Threat Intel</span>
+            </a>
+            <a href="#" class="nav-item" data-page="alerts">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <span>Alerts</span>
+            </a>
+            <a href="#" class="nav-item" data-page="monitoring">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                <span>Monitoring</span>
+            </a>
+            <a href="#" class="nav-item" data-page="reports">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                <span>Reports</span>
+            </a>
+            <a href="#" class="nav-item" data-page="settings">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                <span>Settings</span>
+            </a>
+        </nav>
+    </aside>
+
+    <!-- ═══ MAIN CONTENT ═══ -->
+    <main class="main-content">
+        <header class="topbar">
+            <div class="topbar-left">
+                <div>
+                    <h1 class="page-title">Sentrium Integrated SOC Dashboard</h1>
+                    <p class="page-subtitle">Security Operations Center — Client Overview</p>
+                </div>
+            </div>
+            <div class="topbar-right">
+                <div class="system-status" id="system-status">
+                    <span class="status-dot"></span>
+                    <span class="status-text">All System Operational</span>
+                </div>
+                <a href="/logout" class="topbar-icon-btn user-btn" title="Sign Out">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                </a>
+            </div>
+        </header>
+
+        <!-- Summary Cards -->
+        <section class="summary-row" id="summary-row">
+            <div class="summary-card">
+                <div class="summary-icon blue">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+                </div>
+                <div class="summary-info">
+                    <span class="summary-value" id="total-clients">0</span>
+                    <span class="summary-label">Total Clients</span>
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-icon purple">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                </div>
+                <div class="summary-info">
+                    <span class="summary-value" id="total-endpoints">0</span>
+                    <span class="summary-label">Total Endpoints</span>
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-icon orange">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                </div>
+                <div class="summary-info">
+                    <span class="summary-value" id="total-threats">0</span>
+                    <span class="summary-label">Total Threats</span>
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-icon green">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
+                </div>
+                <div class="summary-info">
+                    <span class="summary-value" id="total-blocked">0</span>
+                    <span class="summary-label">Blocked Attempts</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Client Grid -->
+        <div class="grid-header">
+            <h2>Managed Clients</h2>
+            <span class="client-count" id="client-count">Loading...</span>
+        </div>
+
+        <div class="clients-grid" id="clients-grid">
+            <div class="loading-state" id="loading-state">
+                <div class="loading-spinner"></div>
+                <p>Discovering clients from SentinelOne & AlienVault...</p>
+            </div>
+        </div>
+
+        <!-- Live Indicator -->
+        <div class="live-indicator" id="live-indicator">
+            <span class="live-pulse"></span>
+            <span class="live-text">Last updated: <span id="last-updated">connecting...</span></span>
+        </div>
+    </main>
+
+    <!-- Right Strip -->
+    <aside class="right-strip">
+        <div class="strip-text">
+            <span>Sentrium Security</span>
+            <span class="strip-year">SOC Dashboard</span>
+        </div>
+    </aside>
+
+    <script>
+        const WS_URL = "{{ ws_url }}";
+
+        let ws = null;
+        let lastUpdateTime = null;
+
+        function connectWS() {
+            ws = new WebSocket(WS_URL);
+
+            ws.onopen = () => {
+                document.getElementById('live-indicator').classList.remove('disconnected');
+            };
+
+            ws.onmessage = (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    renderClients(data);
+                    lastUpdateTime = new Date();
+                } catch(err) { console.error('Parse error:', err); }
+            };
+
+            ws.onclose = () => {
+                document.getElementById('live-indicator').classList.add('disconnected');
+                setTimeout(connectWS, 3000);
+            };
+
+            ws.onerror = () => ws.close();
+        }
+
+        function renderClients(state) {
+            const grid = document.getElementById('clients-grid');
+            const clients = state.clients || [];
+
+            // Update summary
+            document.getElementById('total-clients').textContent = clients.length;
+            document.getElementById('total-endpoints').textContent = formatNum(state.global_endpoints || 0);
+            document.getElementById('total-threats').textContent = formatNum(state.global_threats || 0);
+            document.getElementById('total-blocked').textContent = formatNum(state.global_blocked || 0);
+            document.getElementById('client-count').textContent = `${clients.length} clients monitored`;
+
+            // Update status
+            const statusEl = document.getElementById('system-status');
+            statusEl.classList.remove('degraded', 'error');
+            if (state.system_status === 'degraded') {
+                statusEl.classList.add('degraded');
+                statusEl.querySelector('.status-text').textContent = 'Partial Connectivity';
+            } else if (state.system_status === 'error' || state.system_status === 'unconfigured') {
+                statusEl.classList.add('error');
+                statusEl.querySelector('.status-text').textContent = 'Configuration Required';
+            } else {
+                statusEl.querySelector('.status-text').textContent = 'All System Operational';
+            }
+
+            if (!clients.length) {
+                grid.innerHTML = '<div class="loading-state"><p>No clients discovered yet. Check your API credentials.</p></div>';
+                return;
+            }
+
+            let html = '';
+            clients.forEach((c, i) => {
+                const platforms = (c.platforms || []);
+                const badgesHtml = platforms.map(p =>
+                    p === 'SentinelOne'
+                        ? '<span class="platform-badge badge-s1">S1</span>'
+                        : '<span class="platform-badge badge-av">AV</span>'
+                ).join('');
+
+                // Determine threat status
+                let statusDot = '';
+                let statusText = 'Healthy';
+                if (c.total_threats > 10) {
+                    statusDot = 'critical';
+                    statusText = `${c.total_threats} threats`;
+                } else if (c.total_threats > 0) {
+                    statusDot = 'warning';
+                    statusText = `${c.total_threats} threats`;
+                }
+
+                const encodedName = encodeURIComponent(c.name);
+                html += `
+                    <a href="/client/${encodedName}" class="client-card" style="animation-delay: ${i * 0.04}s">
+                        <div class="client-card-header">
+                            <span class="client-name">${escapeHtml(c.name)}</span>
+                            <div class="platform-badges">${badgesHtml}</div>
+                        </div>
+                        <div class="client-metrics">
+                            <div class="client-metric">
+                                <div class="client-metric-value">${formatNum(c.total_endpoints)}</div>
+                                <div class="client-metric-label">Endpoints</div>
+                            </div>
+                            <div class="client-metric">
+                                <div class="client-metric-value">${formatNum(c.total_threats)}</div>
+                                <div class="client-metric-label">Threats</div>
+                            </div>
+                            <div class="client-metric">
+                                <div class="client-metric-value">${formatNum(c.total_alerts)}</div>
+                                <div class="client-metric-label">Alerts</div>
+                            </div>
+                        </div>
+                        <div class="client-card-footer">
+                            <span class="client-status">
+                                <span class="client-status-dot ${statusDot}"></span>
+                                ${statusText}
+                            </span>
+                            <span class="view-btn">
+                                View Dashboard
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+                            </span>
+                        </div>
+                    </a>
+                `;
+            });
+
+            grid.innerHTML = html;
+        }
+
+        // Search filter
+        document.getElementById('search-input').addEventListener('input', (e) => {
+            const query = e.target.value.toLowerCase();
+            document.querySelectorAll('.client-card').forEach(card => {
+                const name = card.querySelector('.client-name').textContent.toLowerCase();
+                card.style.display = name.includes(query) ? '' : 'none';
+            });
+        });
+
+        // Update timer
+        setInterval(() => {
+            if (!lastUpdateTime) return;
+            const secs = Math.floor((Date.now() - lastUpdateTime.getTime()) / 1000);
+            document.getElementById('last-updated').textContent =
+                secs < 5 ? 'just now' : secs < 60 ? `${secs}s ago` : `${Math.floor(secs/60)}m ago`;
+        }, 1000);
+
+        function formatNum(n) {
+            if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
+            if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+            if (n >= 1e3) return (n/1e3).toFixed(1) + 'k';
+            return n.toLocaleString();
+        }
+
+        function escapeHtml(s) {
+            const d = document.createElement('div');
+            d.textContent = s || '';
+            return d.innerHTML;
+        }
+
+        connectWS();
+    </script>
+</body>
+</html>
