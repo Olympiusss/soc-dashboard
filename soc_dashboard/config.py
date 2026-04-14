@@ -49,8 +49,3 @@ class Settings:
     def totp_configured(self) -> bool:
         return bool(self.TOTP_SECRET)
 settings = Settings()
-# ── Startup Diagnostics ─────────────────────────────────────
-_diag_logger = logging.getLogger("soc_dashboard.config")
-_diag_logger.info(f"S1 configured: {settings.s1_configured()} | URL: {settings.S1_BASE_URL}")
-_diag_logger.info(f"AV configured: {settings.av_configured()} | Subdomain: {settings.AV_SUBDOMAIN}")
-_diag_logger.info(f"TOTP configured: {settings.totp_configured()}")
