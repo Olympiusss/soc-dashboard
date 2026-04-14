@@ -87,10 +87,13 @@ async def client_grid(request: Request):
     """Client Grid overview — shows all clients as clickable cards."""
     if not _is_authenticated(request):
         return RedirectResponse(url="/login", status_code=302)
-    return templates.TemplateResponse("clients.html", {
-        "request": request,
-        "ws_url": f"ws://{request.headers.get('host', 'localhost:8080')}/ws",
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="clients.html",
+        context={
+            "ws_url": f"ws://{request.headers.get('host', 'localhost:8080')}/ws",
+        },
+    )
 @app.get("/client/{client_name}", response_class=HTMLResponse)
 async def client_dashboard(request: Request, client_name: str):
     """Per-client SOC dashboard — detailed view for a specific client."""
@@ -98,22 +101,28 @@ async def client_dashboard(request: Request, client_name: str):
         return RedirectResponse(url="/login", status_code=302)
     from urllib.parse import unquote
     decoded_name = unquote(client_name)
-    return templates.TemplateResponse("index.html", {
-        "request": request,
-        "refresh_interval": settings.REFRESH_INTERVAL,
-        "ws_url": f"ws://{request.headers.get('host', 'localhost:8080')}/ws",
-        "client_name": decoded_name,
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={
+            "refresh_interval": settings.REFRESH_INTERVAL,
+            "ws_url": f"ws://{request.headers.get('host', 'localhost:8080')}/ws",
+            "client_name": decoded_name,
+        },
+    )
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     """Login page with TOTP."""
     if _is_authenticated(request):
         return RedirectResponse(url="/", status_code=302)
-    return templates.TemplateResponse("login.html", {
-        "request": request,
-        "error": None,
-        "totp_configured": settings.totp_configured(),
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="login.html",
+        context={
+            "error": None,
+            "totp_configured": settings.totp_configured(),
+        },
+    )
 @app.post("/login", response_class=HTMLResponse)
 async def login_submit(request: Request, totp_code: str = Form(...)):
     """Handle TOTP login form submission."""
@@ -129,11 +138,14 @@ async def login_submit(request: Request, totp_code: str = Form(...)):
         )
         logger.info("User authenticated via TOTP")
         return response
-    return templates.TemplateResponse("login.html", {
-        "request": request,
-        "error": "Invalid verification code. Please try again.",
-        "totp_configured": settings.totp_configured(),
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="login.html",
+        context={
+            "error": "Invalid verification code. Please try again.",
+            "totp_configured": settings.totp_configured(),
+        },
+    )
 @app.get("/logout")
 async def logout(request: Request):
     """Logout and destroy session."""
