@@ -1,16 +1,10 @@
 """
 Sentrium Integrated SOC Dashboard — Configuration
-All settings loaded from environment variables / .env file.
+All settings loaded from environment variables.
+On Railway: env vars are injected natively — no .env file needed.
+For local dev: set variables in your shell or use a .env file manually.
 """
 import os
-import logging
-from pathlib import Path
-from dotenv import load_dotenv
-logger = logging.getLogger("soc_dashboard.config")
-# Load .env for LOCAL development only.
-# override=False means Railway's injected env vars ALWAYS take precedence.
-_env_path = Path(__file__).parent / ".env"
-load_dotenv(_env_path, override=False)
 class Settings:
     """Application settings — sourced from environment variables."""
     @property
