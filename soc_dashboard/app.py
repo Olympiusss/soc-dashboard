@@ -48,6 +48,10 @@ async def _background_fetcher():
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle."""
     global _bg_task
+    # ── Configuration diagnostics ──────────────────────────
+    logger.info(f"S1 configured : {settings.s1_configured()} | token length: {len(settings.S1_API_TOKEN)}")
+    logger.info(f"AV configured : {settings.av_configured()} | client_id: '{settings.AV_CLIENT_ID}'")
+    logger.info(f"TOTP configured: {settings.totp_configured()}")
     # Start background fetcher
     _bg_task = asyncio.create_task(_background_fetcher())
     logger.info("═══ Sentrium SOC Dashboard started ═══")
