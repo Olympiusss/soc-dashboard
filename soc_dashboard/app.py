@@ -91,11 +91,14 @@ async def client_grid(request: Request):
     """Client Grid overview — shows all clients as clickable cards."""
     if not _is_authenticated(request):
         return RedirectResponse(url="/login", status_code=302)
+    host = request.headers.get("host", "localhost:8080")
+    proto = request.headers.get("x-forwarded-proto", "http")
+    ws_scheme = "wss" if proto == "https" else "ws"
     return templates.TemplateResponse(
         request=request,
         name="clients.html",
         context={
-            "ws_url": f"ws://{request.headers.get('host', 'localhost:8080')}/ws",
+            "ws_url": f"{ws_scheme}://{host}/ws",
         },
     )
 @app.get("/client/{client_name}", response_class=HTMLResponse)
@@ -105,12 +108,15 @@ async def client_dashboard(request: Request, client_name: str):
         return RedirectResponse(url="/login", status_code=302)
     from urllib.parse import unquote
     decoded_name = unquote(client_name)
+    host = request.headers.get("host", "localhost:8080")
+    proto = request.headers.get("x-forwarded-proto", "http")
+    ws_scheme = "wss" if proto == "https" else "ws"
     return templates.TemplateResponse(
         request=request,
         name="index.html",
         context={
             "refresh_interval": settings.REFRESH_INTERVAL,
-            "ws_url": f"ws://{request.headers.get('host', 'localhost:8080')}/ws",
+            "ws_url": f"{ws_scheme}://{host}/ws",
             "client_name": decoded_name,
         },
     )
