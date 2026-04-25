@@ -456,31 +456,26 @@ class DashboardAggregator:
             # ── Phase 5: Group AV alarms + events by client ──────────────
             client_alarms: dict[str, list] = {}  # client_name -> [alarms]
             client_events: dict[str, list] = {}  # client_name -> [events]
-            fallback_name = _fallback_av_client_name()
 
             for alarm in av_alarms_raw:
-                sensor_val = alarm.get("sensor", "")
-                # Try exact match in map, then try cleaning the sensor name, then fallback
+                # In USM Central or MSP setups, the client might be under deployment_name
+                sensor_val = alarm.get("deployment_name") or alarm.get("deployment") or alarm.get("sensor") or ""
+                
                 cname = sensor_map.get(sensor_val) 
                 if not cname and sensor_val:
                     cname = _sensor_to_client_name(sensor_val)
-                    if cname == sensor_val and not _find_best_match(_normalize_name(cname), list(clients.keys())):
-                        # If cleaning didn't help and no fuzzy match, use fallback
-                        cname = fallback_name
                 elif not cname:
-                    cname = fallback_name
+                    cname = _fallback_av_client_name()
                 
                 client_alarms.setdefault(cname, []).append(alarm)
 
             for event in av_events_raw:
-                sensor_val = event.get("sensor_uuid", "") or event.get("sensor", "")
+                sensor_val = event.get("deployment_name") or event.get("sensor_uuid") or event.get("sensor") or ""
                 cname = sensor_map.get(sensor_val)
                 if not cname and sensor_val:
                     cname = _sensor_to_client_name(sensor_val)
-                    if cname == sensor_val and not _find_best_match(_normalize_name(cname), list(clients.keys())):
-                        cname = fallback_name
                 elif not cname:
-                    cname = fallback_name
+                    cname = _fallback_av_client_name()
                     
                 client_events.setdefault(cname, []).append(event)
 
@@ -493,7 +488,9 @@ class DashboardAggregator:
             for av_name, alarms in client_alarms.items():
                 events   = client_events.get(av_name, [])
                 norm_av  = _normalize_name(av_name)
-                s1_match = _find_best_match(norm_av, list(clients.keys()))
+                
+                # Check for an explicit hardcoded mapping first, then fuzzy match
+                s1_match = _find_best_match(norm_av, list(clients.keys()), raw_av_name=av_name)
 
                 if s1_match:
                     _merge_av_data(clients[s1_match], alarms, events)
@@ -501,9 +498,12 @@ class DashboardAggregator:
                         f"AV: '{av_name}' merged into S1 client '{clients[s1_match].name}'"
                     )
                 else:
-                    av_only = self._build_av_summary(alarms, events, av_name)
+                    # If no S1 match, create a standalone AV-only card!
+                    # Do NOT dump it into Cybervergent anymore.
+                    clean_display_name = av_name.title().replace("-", " ")
+                    av_only = self._build_av_summary(alarms, events, clean_display_name)
                     clients[norm_av] = av_only
-                    logger.info(f"AV: '{av_name}' added as AV-only client")
+                    logger.info(f"AV: '{av_name}' added as standalone AV-only client")
 
             client_list = list(clients.values())
 
@@ -934,29 +934,55 @@ def _normalize_name(name: str) -> str:
     return " ".join(tokens)
 
 
-def _find_best_match(norm_target: str, candidates: list) -> Optional[str]:
+# Explicit mapping for AlienVault names -> SentinelOne names
+# Use lowercase for both sides of the mapping
+_AV_TO_S1_MAP = {
+    "appzonegroup (qore)": "qore inc technologies",
+    "appzonegroup": "qore inc technologies",
+    "appzone": "qore inc technologies",
+    "qore": "qore inc technologies",
+    "zonenetwork": "zone payment network limited",
+    "etranzact2": "etranzact",
+    "etranzact": "etranzact",
+    "cybervergent": "cybervergent",
+    "esentry-nfr": "cybervergent",
+}
+
+def _find_best_match(norm_target: str, candidates: list, raw_av_name: str = "") -> Optional[str]:
     """
     Fuzzy-match norm_target against a list of normalized candidate keys.
-    Priority: exact → substring → Jaccard word-overlap (≥ 30 % union).
+    Priority: Explicit Map -> exact → substring → Jaccard word-overlap (≥ 30 % union).
     Returns the best matching key or None.
     """
-    if not norm_target or not candidates:
+    if not candidates:
+        return None
+
+    # 1. Check explicit mapping first
+    raw_lower = raw_av_name.lower().strip()
+    if raw_lower in _AV_TO_S1_MAP:
+        mapped_s1 = _AV_TO_S1_MAP[raw_lower]
+        # Find the normalized candidate that matches our mapped S1 name
+        for key in candidates:
+            if mapped_s1 in key or key in mapped_s1:
+                return key
+
+    if not norm_target:
         return None
 
     target_words = set(norm_target.split())
     best_key, best_score = None, 0.0
 
     for key in candidates:
-        # Exact
+        # 2. Exact
         if norm_target == key:
             return key
-        # Substring
+        # 3. Substring
         if norm_target in key or key in norm_target:
             score = len(norm_target) if norm_target in key else len(key)
             if score > best_score:
                 best_score, best_key = float(score), key
             continue
-        # Word overlap (Jaccard)
+        # 4. Word overlap (Jaccard)
         key_words = set(key.split())
         common = target_words & key_words
         if not common:
