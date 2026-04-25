@@ -353,16 +353,19 @@ class AVFetcher:
 
 
     async def _fetch_alarms_one(self, dep_url: str, dep_name: str, central_token: str, days_back: int) -> list[dict]:
-        """Fetch all alarm pages from one deployment, tagging each with _deployment_name."""
+        """Fetch alarms from one deployment. Memory-safe: max 5 pages, 200 per page."""
+        if not dep_url:
+            logger.warning(f"AV: {dep_name} has no URL — skipping")
+            return []
         client = await self._get_client()
         token = (await self._get_deployment_token(dep_url)) or central_token
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         now = datetime.now(timezone.utc)
-        start_ms = int((now - timedelta(days=days_back + 30)).timestamp() * 1000)
+        start_ms = int((now - timedelta(days=days_back)).timestamp() * 1000)
         end_ms   = int(now.timestamp() * 1000)
         url = dep_url.rstrip("/") + "/api/2.0/alarms"
         params = {"timestamp_occured_gte": start_ms, "timestamp_occured_lte": end_ms,
-                  "sort": "timestamp_occured,desc", "size": 500, "page": 0}
+                  "sort": "timestamp_occured,desc", "size": 200, "page": 0}
         all_alarms: list[dict] = []
         try:
             resp = await client.get(url, headers=headers, params=params, timeout=30)
@@ -375,7 +378,9 @@ class AVFetcher:
             for a in batch:
                 a["_deployment_name"] = dep_name
             all_alarms.extend(batch)
-            if total_pages > 1:
+            # Cap at 5 pages (1,000 alarms max per deployment) to prevent OOM
+            max_pages = min(total_pages, 5)
+            if max_pages > 1:
                 async def _page(pg: int) -> list[dict]:
                     try:
                         r = await client.get(url, headers=headers,
@@ -389,7 +394,7 @@ class AVFetcher:
                         pass
                     return []
                 pages = await asyncio.gather(
-                    *[_page(p) for p in range(1, min(total_pages, 20))],
+                    *[_page(p) for p in range(1, max_pages)],
                     return_exceptions=True,
                 )
                 for r in pages:
@@ -400,13 +405,12 @@ class AVFetcher:
         logger.info(f"AV: {dep_name} → {len(all_alarms)} alarms")
         return all_alarms
 
-    async def fetch_alarms_per_deployment(self, days_back: int = 30) -> dict[str, list]:
+    async def fetch_alarms_per_deployment(self, days_back: int = 7) -> dict[str, list]:
         """
-        Fetch alarms from ALL deployments in parallel.
-        Returns {deployment_name: [alarms]} — one entry per client.
-        Falls back to central-only if no deployments are found.
+        Fetch alarms from ALL deployments with concurrency control to prevent OOM.
+        Uses a semaphore to limit to 4 concurrent deployment fetches.
         """
-        logger.info(f"AV: fetch_alarms_per_deployment called | base_url={self.base_url} | client_id={settings.AV_CLIENT_ID[:6]}...")
+        logger.info(f"AV: fetch_alarms_per_deployment | base_url={self.base_url} | client_id={settings.AV_CLIENT_ID[:6]}...")
         if not settings.av_configured():
             logger.warning("AV: Not configured — AV_CLIENT_ID or AV_CLIENT_SECRET is empty")
             return {}
@@ -419,20 +423,30 @@ class AVFetcher:
             name = _fallback_av_client_name()
             alarms = await self._fetch_alarms_one(self.base_url, name, central_token, days_back)
             return {name: alarms} if alarms else {}
+
+        # Use semaphore to cap concurrent fetches at 4 (prevents OOM)
+        sem = asyncio.Semaphore(4)
+
+        async def _fetch_with_sem(dep: dict) -> tuple[str, list]:
+            dep_url  = dep.get("_resolved_url", "")
+            dep_name = dep.get("name", "Unknown")
+            async with sem:
+                alarms = await self._fetch_alarms_one(dep_url, dep_name, central_token, days_back)
+            return dep_name, alarms
+
         results = await asyncio.gather(
-            *[self._fetch_alarms_one(d["_resolved_url"], d.get("name", "Unknown"),
-                                     central_token, days_back)
-              for d in deployments],
+            *[_fetch_with_sem(d) for d in deployments],
             return_exceptions=True,
         )
         out: dict[str, list] = {}
-        for dep, res in zip(deployments, results):
-            name = dep.get("name", "Unknown")
-            if isinstance(res, list) and res:
-                out[name] = res
+        for res in results:
+            if isinstance(res, tuple):
+                name, alarms = res
+                if alarms:
+                    out[name] = alarms
             elif isinstance(res, Exception):
-                logger.error(f"AV {name}: {res}")
-        logger.info(f"AV: Deployments with alarms: {list(out.keys())}")
+                logger.error(f"AV deployment fetch error: {res}")
+        logger.info(f"AV: {len(out)} deployments with alarms: {list(out.keys())}")
         return out
 
     async def fetch_alarms(self, days_back: int = 30) -> list[dict]:
