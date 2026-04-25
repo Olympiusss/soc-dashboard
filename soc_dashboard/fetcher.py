@@ -201,14 +201,15 @@ class AVFetcher:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    async def _get_token(self) -> Optional[str]:
-        """Get or refresh the central OAuth2 token, trying multiple endpoints."""
+    async def _get_token_with_path(self) -> tuple[Optional[str], str]:
+        """Get OAuth2 token + base API path (e.g. '/api/1.1') from the working endpoint."""
         if self._token and time.time() < self._token_expiry:
-            return self._token
+            return self._token, getattr(self, "_base_api_path", "/api/1.1")
 
         client = await self._get_client()
         base = self.base_url.rstrip("/")
-        for ep in ("/api/1.1/oauth/token", "/api/2.0/oauth/token", "/api/1.0/oauth/token"):
+        for ep in ("/api/1.1/oauth/token", "/api/1.0/oauth/token", "/api/2.0/oauth/token",
+                   "/oauth/token", "/oauth2/token"):
             try:
                 resp = await client.post(
                     base + ep,
@@ -219,13 +220,25 @@ class AVFetcher:
                     data = resp.json()
                     self._token = data.get("access_token")
                     self._token_expiry = time.time() + int(data.get("expires_in", 3600)) - 60
-                    logger.info(f"AV: Token acquired via {ep}")
-                    return self._token
+                    # Derive base path from the working endpoint
+                    if "1.1" in ep:
+                        self._base_api_path = "/api/1.1"
+                    elif "2.0" in ep:
+                        self._base_api_path = "/api/2.0"
+                    else:
+                        self._base_api_path = "/api/1.1"
+                    logger.info(f"AV: Token acquired via {ep} (base_path={self._base_api_path})")
+                    return self._token, self._base_api_path
                 logger.warning(f"AV auth {ep} → HTTP {resp.status_code}")
             except Exception as e:
                 logger.warning(f"AV auth {ep} → {e}")
         logger.error("AV: All auth endpoints failed")
-        return None
+        return None, "/api/1.1"
+
+    async def _get_token(self) -> Optional[str]:
+        """Compatibility wrapper — returns just the token."""
+        token, _ = await self._get_token_with_path()
+        return token
 
     def _resolve_deployment_url(self, dep: dict) -> Optional[str]:
         """Extract a usable base URL from a deployment object."""
@@ -281,42 +294,63 @@ class AVFetcher:
         return None
 
     async def fetch_deployments(self) -> list[dict]:
-        """Fetch all client deployments from AlienVault USM Central."""
+        """Fetch all deployments — exact async port of working extractor."""
         if not settings.av_configured():
             return []
         if self._deployments:
             return self._deployments
-        token = await self._get_token()
+        token, base_api_path = await self._get_token_with_path()
         if not token:
             return []
         client = await self._get_client()
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        for path in ("/api/1.1/deployments", "/api/2.0/deployments", "/api/1.0/deployments"):
+        base = self.base_url.rstrip("/")
+        # Mirror working extractor: base_api_path first, then fallbacks, deduplicated
+        paths_raw = [
+            f"{base_api_path.rstrip('/')}/deployments",
+            "/api/2.0/deployments",
+            "/api/1.1/deployments",
+            "/deployments",
+        ]
+        seen: set = set()
+        paths = [p for p in paths_raw if not (p in seen or seen.add(p))]  # type: ignore
+        for path in paths:
             try:
-                resp = await client.get(self.base_url.rstrip("/") + path, headers=headers, timeout=30)
+                resp = await client.get(base + path, headers=headers, timeout=30)
                 logger.info(f"AV deployments {path} → HTTP {resp.status_code}")
                 if resp.status_code == 200:
                     data = resp.json()
-                    deps = (
-                        data.get("_embedded", {}).get("deployments")
-                        or data.get("deployments")
-                        or (data if isinstance(data, list) else [])
-                    )
-                    # Log a sample deployment so we can see its fields
+                    import json as _json
+                    logger.info(f"AV deployments raw: {_json.dumps(data)[:600]}")
+                    # Exact if/elif pattern from working extractor (avoids 'or' chaining bug)
+                    if "_embedded" in data:
+                        embedded = data["_embedded"]
+                        # Try all possible key names
+                        deps = (embedded.get("deployments")
+                                or embedded.get("tenantList")
+                                or embedded.get("tenants")
+                                or next(iter(embedded.values()), []))
+                    elif isinstance(data, list):
+                        deps = data
+                    else:
+                        deps = data.get("deployments", [])
+                    logger.info(f"AV: {len(deps)} deployment objects from {path}")
                     if deps:
-                        logger.info(f"AV: Sample deployment keys: {list(deps[0].keys())}")
-                        logger.info(f"AV: Sample deployment: {deps[0]}")
-                    for d in deps:
-                        d["_resolved_url"] = self._resolve_deployment_url(d)
-                    valid = [d for d in deps if d.get("_resolved_url")]
-                    logger.info(f"AV: Found {len(deps)} deployments, {len(valid)} with usable URLs")
-                    if valid:
-                        self._deployments = valid
-                        return valid
+                        logger.info(f"AV: keys={list(deps[0].keys())} | first={deps[0]}")
+                        for d in deps:
+                            d["_resolved_url"] = self._resolve_deployment_url(d)
+                        valid = [d for d in deps if d.get("_resolved_url")]
+                        logger.info(f"AV: {len(valid)}/{len(deps)} with resolved URLs")
+                        # Return all (even without URLs) — alarm fetch skips unresolvable ones
+                        self._deployments = deps
+                        return deps
+                    else:
+                        logger.warning(f"AV: {path} returned 200 but 0 deployments")
             except Exception as e:
                 logger.warning(f"AV deployments {path} → {e}")
-        logger.warning("AV: No deployments found — will use central URL as fallback")
+        logger.warning("AV: No deployments — using central URL as fallback")
         return []
+
 
     async def _fetch_alarms_one(self, dep_url: str, dep_name: str, central_token: str, days_back: int) -> list[dict]:
         """Fetch all alarm pages from one deployment, tagging each with _deployment_name."""
@@ -372,7 +406,9 @@ class AVFetcher:
         Returns {deployment_name: [alarms]} — one entry per client.
         Falls back to central-only if no deployments are found.
         """
+        logger.info(f"AV: fetch_alarms_per_deployment called | base_url={self.base_url} | client_id={settings.AV_CLIENT_ID[:6]}...")
         if not settings.av_configured():
+            logger.warning("AV: Not configured — AV_CLIENT_ID or AV_CLIENT_SECRET is empty")
             return {}
         central_token = await self._get_token()
         if not central_token:
