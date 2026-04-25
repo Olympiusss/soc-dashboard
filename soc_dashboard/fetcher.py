@@ -177,20 +177,23 @@ class S1Fetcher:
 # ════════════════════════════════════════════════════════════════
 
 class AVFetcher:
-    """Async AlienVault USM Anywhere API client."""
+    """Async AlienVault USM Anywhere API client (deployments-based)."""
 
     def __init__(self):
         self.subdomain = settings.AV_SUBDOMAIN
-        self.base_url = f"https://{self.subdomain}/api/2.0"
+        self.base_url = f"https://{self.subdomain}"
         self._token: Optional[str] = None
         self._token_expiry: float = 0
+        self._dep_tokens: dict = {}      # dep_url -> {token, expiry}
+        self._deployments: list = []     # cached deployment list
         self._client: Optional[httpx.AsyncClient] = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
+                verify=False,
                 timeout=httpx.Timeout(60.0, connect=15.0),
-                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=5),
             )
         return self._client
 
@@ -199,159 +202,225 @@ class AVFetcher:
             await self._client.aclose()
 
     async def _get_token(self) -> Optional[str]:
-        """Get or refresh OAuth2 token."""
+        """Get or refresh the central OAuth2 token, trying multiple endpoints."""
         if self._token and time.time() < self._token_expiry:
             return self._token
 
         client = await self._get_client()
-        token_url = f"{self.base_url}/oauth/token"
-        logger.info(f"AV: Requesting OAuth token from {token_url}")
-        logger.info(f"AV: Using client_id={settings.AV_CLIENT_ID[:8]}...")
-        try:
-            resp = await client.post(
-                token_url,
-                data={"grant_type": "client_credentials"},
-                auth=(settings.AV_CLIENT_ID, settings.AV_CLIENT_SECRET),
-            )
-            if resp.status_code != 200:
-                logger.error(f"AV auth failed: HTTP {resp.status_code} - {resp.text[:300]}")
-                return None
+        base = self.base_url.rstrip("/")
+        for ep in ("/api/1.1/oauth/token", "/api/2.0/oauth/token", "/api/1.0/oauth/token"):
+            try:
+                resp = await client.post(
+                    base + ep,
+                    data={"grant_type": "client_credentials"},
+                    auth=(settings.AV_CLIENT_ID, settings.AV_CLIENT_SECRET),
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    self._token = data.get("access_token")
+                    self._token_expiry = time.time() + int(data.get("expires_in", 3600)) - 60
+                    logger.info(f"AV: Token acquired via {ep}")
+                    return self._token
+                logger.warning(f"AV auth {ep} → HTTP {resp.status_code}")
+            except Exception as e:
+                logger.warning(f"AV auth {ep} → {e}")
+        logger.error("AV: All auth endpoints failed")
+        return None
 
-            data = resp.json()
-            self._token = data.get("access_token")
-            expires_in = data.get("expires_in", 3600)
-            self._token_expiry = time.time() + expires_in - 60
-            logger.info(f"AV: OAuth token acquired (expires in {expires_in}s)")
-            return self._token
+    def _resolve_deployment_url(self, dep: dict) -> Optional[str]:
+        """Extract a usable base URL from a deployment object."""
+        for key in ("url", "fqdn", "hostname", "base_url"):
+            val = dep.get(key, "")
+            if val:
+                return (f"https://{val}" if not val.startswith("http") else val).rstrip("/")
+        self_link = dep.get("_links", {}).get("self", {}).get("href", "")
+        if self_link and "alienvault.cloud" in self_link:
+            from urllib.parse import urlparse as _up
+            p = _up(self_link)
+            if p.scheme and p.netloc:
+                return f"{p.scheme}://{p.netloc}"
+        dep_id = dep.get("id", "")
+        if dep_id and "://" in dep_id:
+            return f"https://{dep_id.split('://')[1].split('/')[0]}"
+        name = dep.get("name", "")
+        if name and ".alienvault.cloud" in name:
+            return (f"https://{name}" if not name.startswith("http") else name).rstrip("/")
+        return None
 
-        except httpx.ConnectError as e:
-            logger.error(f"AV: Connection failed to {self.subdomain}: {e}")
-            return None
-        except httpx.TimeoutException as e:
-            logger.error(f"AV: Timeout connecting to {self.subdomain}: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"AV: Token error ({type(e).__name__}): {e}")
-            return None
+    async def _get_deployment_token(self, dep_url: str) -> Optional[str]:
+        """Authenticate against a specific deployment and cache the token."""
+        cached = self._dep_tokens.get(dep_url)
+        if cached and time.time() < cached["expiry"]:
+            return cached["token"]
+        client = await self._get_client()
+        for ep in ("/api/2.0/oauth/token", "/api/1.1/oauth/token"):
+            try:
+                resp = await client.post(
+                    dep_url.rstrip("/") + ep,
+                    data={"grant_type": "client_credentials"},
+                    auth=(settings.AV_CLIENT_ID, settings.AV_CLIENT_SECRET),
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    token = data.get("access_token")
+                    self._dep_tokens[dep_url] = {
+                        "token": token,
+                        "expiry": time.time() + int(data.get("expires_in", 3600)) - 300,
+                    }
+                    return token
+            except Exception:
+                continue
+        return None
 
-    async def _fetch_paginated(self, endpoint: str, params: dict, max_records: int = 5000) -> list[dict]:
-        """Fetch paginated data from AlienVault."""
+    async def fetch_deployments(self) -> list[dict]:
+        """Fetch all client deployments from AlienVault USM Central."""
+        if not settings.av_configured():
+            return []
+        if self._deployments:
+            return self._deployments
         token = await self._get_token()
         if not token:
             return []
-
         client = await self._get_client()
-        headers = {"Authorization": f"Bearer {token}"}
-        params = {**params, "size": 500, "page": 0}
-        url = f"{self.base_url}/{endpoint}"
-
-        response_keys = {"events": "eventResources", "alarms": "alarms"}
-        data_key = response_keys.get(endpoint, endpoint)
-
-        all_data = []
-
-        try:
-            resp = await client.get(url, headers=headers, params=params)
-            if resp.status_code != 200:
-                logger.warning(f"AV {endpoint} returned {resp.status_code}")
-                return []
-
-            body = resp.json()
-            total_pages = body.get("page", {}).get("totalPages", 0)
-            items = body.get("_embedded", {}).get(data_key, [])
-            all_data.extend(items)
-
-            # Fetch remaining pages concurrently
-            if total_pages > 1:
-                pages_to_fetch = min(total_pages, max_records // 500 + 1)
-                tasks = []
-                for page in range(1, pages_to_fetch):
-                    page_params = {**params, "page": page}
-                    tasks.append(self._fetch_single_page(url, headers, page_params, data_key))
-
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, list):
-                        all_data.extend(result)
-                    if len(all_data) >= max_records:
-                        break
-
-        except Exception as e:
-            logger.error(f"AV fetch error on {endpoint}: {e}")
-
-        return all_data[:max_records]
-
-    async def _fetch_single_page(self, url: str, headers: dict, params: dict, data_key: str) -> list[dict]:
-        client = await self._get_client()
-        try:
-            resp = await client.get(url, headers=headers, params=params)
-            if resp.status_code == 200:
-                return resp.json().get("_embedded", {}).get(data_key, [])
-        except Exception:
-            pass
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        for path in ("/api/1.1/deployments", "/api/2.0/deployments"):
+            try:
+                resp = await client.get(self.base_url.rstrip("/") + path, headers=headers, timeout=30)
+                logger.info(f"AV deployments {path} → HTTP {resp.status_code}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    deps = (
+                        data.get("_embedded", {}).get("deployments")
+                        or data.get("deployments")
+                        or (data if isinstance(data, list) else [])
+                    )
+                    for d in deps:
+                        d["_resolved_url"] = self._resolve_deployment_url(d)
+                    valid = [d for d in deps if d.get("_resolved_url")]
+                    logger.info(f"AV: Found {len(valid)} deployments with usable URLs")
+                    self._deployments = valid
+                    return valid
+            except Exception as e:
+                logger.warning(f"AV deployments {path} → {e}")
+        logger.warning("AV: No deployments found — will use central URL as fallback")
         return []
+
+    async def _fetch_alarms_one(self, dep_url: str, dep_name: str, central_token: str, days_back: int) -> list[dict]:
+        """Fetch all alarm pages from one deployment, tagging each with _deployment_name."""
+        client = await self._get_client()
+        token = (await self._get_deployment_token(dep_url)) or central_token
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        now = datetime.now(timezone.utc)
+        start_ms = int((now - timedelta(days=days_back + 30)).timestamp() * 1000)
+        end_ms   = int(now.timestamp() * 1000)
+        url = dep_url.rstrip("/") + "/api/2.0/alarms"
+        params = {"timestamp_occured_gte": start_ms, "timestamp_occured_lte": end_ms,
+                  "sort": "timestamp_occured,desc", "size": 500, "page": 0}
+        all_alarms: list[dict] = []
+        try:
+            resp = await client.get(url, headers=headers, params=params, timeout=30)
+            if resp.status_code != 200:
+                logger.warning(f"AV alarms {dep_name} → HTTP {resp.status_code}")
+                return []
+            body = resp.json()
+            total_pages = body.get("page", {}).get("totalPages", 1)
+            batch = body.get("_embedded", {}).get("alarms", [])
+            for a in batch:
+                a["_deployment_name"] = dep_name
+            all_alarms.extend(batch)
+            if total_pages > 1:
+                async def _page(pg: int) -> list[dict]:
+                    try:
+                        r = await client.get(url, headers=headers,
+                                             params={**params, "page": pg}, timeout=30)
+                        if r.status_code == 200:
+                            items = r.json().get("_embedded", {}).get("alarms", [])
+                            for a in items:
+                                a["_deployment_name"] = dep_name
+                            return items
+                    except Exception:
+                        pass
+                    return []
+                pages = await asyncio.gather(
+                    *[_page(p) for p in range(1, min(total_pages, 20))],
+                    return_exceptions=True,
+                )
+                for r in pages:
+                    if isinstance(r, list):
+                        all_alarms.extend(r)
+        except Exception as e:
+            logger.error(f"AV alarm fetch {dep_name}: {e}")
+        logger.info(f"AV: {dep_name} → {len(all_alarms)} alarms")
+        return all_alarms
+
+    async def fetch_alarms_per_deployment(self, days_back: int = 30) -> dict[str, list]:
+        """
+        Fetch alarms from ALL deployments in parallel.
+        Returns {deployment_name: [alarms]} — one entry per client.
+        Falls back to central-only if no deployments are found.
+        """
+        if not settings.av_configured():
+            return {}
+        central_token = await self._get_token()
+        if not central_token:
+            return {}
+        deployments = await self.fetch_deployments()
+        if not deployments:
+            logger.info("AV: No deployments — fetching from central URL as single client")
+            name = _fallback_av_client_name()
+            alarms = await self._fetch_alarms_one(self.base_url, name, central_token, days_back)
+            return {name: alarms} if alarms else {}
+        results = await asyncio.gather(
+            *[self._fetch_alarms_one(d["_resolved_url"], d.get("name", "Unknown"),
+                                     central_token, days_back)
+              for d in deployments],
+            return_exceptions=True,
+        )
+        out: dict[str, list] = {}
+        for dep, res in zip(deployments, results):
+            name = dep.get("name", "Unknown")
+            if isinstance(res, list) and res:
+                out[name] = res
+            elif isinstance(res, Exception):
+                logger.error(f"AV {name}: {res}")
+        logger.info(f"AV: Deployments with alarms: {list(out.keys())}")
+        return out
 
     async def fetch_alarms(self, days_back: int = 30) -> list[dict]:
-        """Fetch alarms from AlienVault."""
-        if not settings.av_configured():
-            logger.info("AV: Not configured, skipping alarms")
-            return []
-
-        logger.info(f"AV: Fetching alarms (last {days_back} days)...")
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(days=days_back)
-        start_ms = int(start.timestamp() * 1000)
-        end_ms = int(now.timestamp() * 1000)
-
-        result = await self._fetch_paginated("alarms", {
-            "timestamp_received_gte": start_ms,
-            "timestamp_received_lte": end_ms,
-            "sort": "timestamp_received,desc",
-            "suppressed": False,
-        })
-        logger.info(f"AV: Fetched {len(result)} alarms")
-        return result
+        """Flat alarm list (used by debug endpoint)."""
+        all_alarms: list[dict] = []
+        for alarms in (await self.fetch_alarms_per_deployment(days_back)).values():
+            all_alarms.extend(alarms)
+        return all_alarms
 
     async def fetch_events(self, days_back: int = 1) -> list[dict]:
-        """Fetch events from AlienVault."""
-        if not settings.av_configured():
-            logger.info("AV: Not configured, skipping events")
-            return []
-
-        logger.info(f"AV: Fetching events (last {days_back} days)...")
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(days=days_back)
-        start_ms = int(start.timestamp() * 1000)
-        end_ms = int(now.timestamp() * 1000)
-
-        result = await self._fetch_paginated("events", {
-            "timestamp_received_gte": start_ms,
-            "timestamp_received_lte": end_ms,
-            "sort": "timestamp_received,desc",
-        }, max_records=2000)
-        logger.info(f"AV: Fetched {len(result)} events")
-        return result
-
-    async def fetch_sensors(self) -> list[dict]:
-        """Fetch sensor list from AlienVault."""
+        """Fetch events from central URL (summary use only)."""
         if not settings.av_configured():
             return []
         token = await self._get_token()
         if not token:
             return []
         client = await self._get_client()
-        headers = {"Authorization": f"Bearer {token}"}
+        now = datetime.now(timezone.utc)
+        start_ms = int((now - timedelta(days=days_back)).timestamp() * 1000)
+        end_ms   = int(now.timestamp() * 1000)
         try:
-            resp = await client.get(f"{self.base_url}/sensors", headers=headers)
+            resp = await client.get(
+                self.base_url.rstrip("/") + "/api/2.0/events",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"timestamp_received_gte": start_ms, "timestamp_received_lte": end_ms,
+                        "sort": "timestamp_received,desc", "size": 500, "page": 0},
+            )
             if resp.status_code == 200:
-                sensors = resp.json().get("_embedded", {}).get("sensors", [])
-                logger.info(f"AV: Discovered {len(sensors)} sensors")
-                return sensors
-            else:
-                logger.warning(f"AV sensors endpoint returned {resp.status_code}")
+                return resp.json().get("_embedded", {}).get("eventResources", [])
         except Exception as e:
-            logger.warning(f"AV sensors fetch error: {e}")
+            logger.warning(f"AV events: {e}")
         return []
+
+    async def fetch_sensors(self) -> list[dict]:
+        """Legacy — returns deployments as sensor objects for compatibility."""
+        return await self.fetch_deployments()
+
 
 
 # ════════════════════════════════════════════════════════════════
@@ -407,7 +476,7 @@ class DashboardAggregator:
 
             logger.info(f"Discovery: {len(s1_sites)} S1 sites, {len(av_sensors)} AV sensors")
 
-            # ── Phase 2: Full parallel data fetch ────────────────────────
+            # ── Phase 2: Parallel data fetch ───────────────────────────────
             valid_s1_sites = [s for s in s1_sites if s.get("id")]
             s1_build_tasks = [
                 self._build_s1_client(str(s["id"]), s.get("name", "Unknown"))
@@ -415,23 +484,22 @@ class DashboardAggregator:
             ]
             all_results = await asyncio.gather(
                 *s1_build_tasks,
-                self.av.fetch_alarms(days_back=30),
+                self.av.fetch_alarms_per_deployment(days_back=30),
                 self.av.fetch_events(days_back=1),
                 return_exceptions=True,
             )
 
             n_s1 = len(s1_build_tasks)
-            s1_results = all_results[:n_s1]
-            av_alarms_raw = all_results[n_s1]   if not isinstance(all_results[n_s1],   Exception) else []
-            av_events_raw = all_results[n_s1+1] if not isinstance(all_results[n_s1+1], Exception) else []
+            s1_results       = all_results[:n_s1]
+            av_per_dep_raw   = all_results[n_s1]   if not isinstance(all_results[n_s1],   Exception) else {}
+            av_events_raw    = all_results[n_s1+1] if not isinstance(all_results[n_s1+1], Exception) else []
 
-            if isinstance(av_alarms_raw, Exception):
-                logger.error(f"AV alarms error: {av_alarms_raw}"); av_alarms_raw = []
+            if isinstance(av_per_dep_raw, Exception):
+                logger.error(f"AV per-deployment fetch error: {av_per_dep_raw}"); av_per_dep_raw = {}
             if isinstance(av_events_raw, Exception):
                 logger.error(f"AV events error: {av_events_raw}"); av_events_raw = []
 
             # ── Phase 3: Build S1 client index ───────────────────────────
-            # { normalized_name: ClientSummary }
             clients: dict[str, ClientSummary] = {}
             for result, site in zip(s1_results, valid_s1_sites):
                 if isinstance(result, ClientSummary):
@@ -440,70 +508,25 @@ class DashboardAggregator:
                 else:
                     logger.error(f"S1 build error for '{site.get('name')}': {result}")
 
-            # ── Phase 4: Build AV sensor UUID & Name → client name map ───
-            sensor_map: dict[str, str] = {}
-            for sensor in av_sensors:
-                uid  = sensor.get("uuid") or sensor.get("id") or ""
-                raw  = sensor.get("name", "")
-                name = _sensor_to_client_name(raw)
-                if uid and name:
-                    sensor_map[uid] = name
-                if raw and name:
-                    sensor_map[raw] = name  # Also map the raw name
+            # ── Phase 4: Merge AV deployments into S1 clients (or create AV-only) ──
+            # av_per_dep_raw = {dep_name: [alarms], ...} — each key IS the client name
+            total_av_alarms = sum(len(v) for v in av_per_dep_raw.values())
+            logger.info(f"AV: {len(av_per_dep_raw)} deployments, {total_av_alarms} total alarms")
+            logger.info(f"AV: deployment names: {list(av_per_dep_raw.keys())}")
 
-            logger.info(f"AV: {len(av_sensors)} sensors mapped to client names")
-
-            # ── Phase 5: Group AV alarms + events by client ──────────────
-            client_alarms: dict[str, list] = {}  # client_name -> [alarms]
-            client_events: dict[str, list] = {}  # client_name -> [events]
-
-            for alarm in av_alarms_raw:
-                # In USM Central or MSP setups, the client might be under deployment_name
-                sensor_val = alarm.get("deployment_name") or alarm.get("deployment") or alarm.get("sensor") or ""
-                
-                cname = sensor_map.get(sensor_val) 
-                if not cname and sensor_val:
-                    cname = _sensor_to_client_name(sensor_val)
-                elif not cname:
-                    cname = _fallback_av_client_name()
-                
-                client_alarms.setdefault(cname, []).append(alarm)
-
-            for event in av_events_raw:
-                sensor_val = event.get("deployment_name") or event.get("sensor_uuid") or event.get("sensor") or ""
-                cname = sensor_map.get(sensor_val)
-                if not cname and sensor_val:
-                    cname = _sensor_to_client_name(sensor_val)
-                elif not cname:
-                    cname = _fallback_av_client_name()
-                    
-                client_events.setdefault(cname, []).append(event)
-
-            logger.info(
-                f"AV: grouped into {len(client_alarms)} clients: "
-                f"{list(client_alarms.keys())}"
-            )
-
-            # ── Phase 6: Merge AV into S1 clients (or create AV-only) ────
-            for av_name, alarms in client_alarms.items():
-                events   = client_events.get(av_name, [])
-                norm_av  = _normalize_name(av_name)
-                
-                # Check for an explicit hardcoded mapping first, then fuzzy match
-                s1_match = _find_best_match(norm_av, list(clients.keys()), raw_av_name=av_name)
+            for dep_name, alarms in av_per_dep_raw.items():
+                norm_dep = _normalize_name(dep_name)
+                s1_match = _find_best_match(norm_dep, list(clients.keys()), raw_av_name=dep_name)
 
                 if s1_match:
-                    _merge_av_data(clients[s1_match], alarms, events)
-                    logger.info(
-                        f"AV: '{av_name}' merged into S1 client '{clients[s1_match].name}'"
-                    )
+                    _merge_av_data(clients[s1_match], alarms, [])
+                    logger.info(f"AV: '{dep_name}' merged → S1 '{clients[s1_match].name}'")
                 else:
-                    # If no S1 match, create a standalone AV-only card!
-                    # Do NOT dump it into Cybervergent anymore.
-                    clean_display_name = av_name.title().replace("-", " ")
-                    av_only = self._build_av_summary(alarms, events, clean_display_name)
-                    clients[norm_av] = av_only
-                    logger.info(f"AV: '{av_name}' added as standalone AV-only client")
+                    clean_name = dep_name.replace("-", " ").title()
+                    av_only = self._build_av_summary(alarms, [], clean_name)
+                    clients[norm_dep] = av_only
+                    logger.info(f"AV: '{dep_name}' → standalone AV-only card")
+
 
             client_list = list(clients.values())
 
