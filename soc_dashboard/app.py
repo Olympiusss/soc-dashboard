@@ -1,320 +1,1082 @@
 """
-Sentrium Integrated SOC Dashboard — FastAPI Application
-Main entry point. Serves dashboard, handles auth, runs background fetcher.
+Sentrium Integrated SOC Dashboard — Async Data Fetcher
+High-performance async engine for SentinelOne + AlienVault APIs.
+Uses httpx with connection pooling for maximum throughput.
 """
 
 from __future__ import annotations
 import asyncio
 import logging
-from pathlib import Path
-from contextlib import asynccontextmanager
+import time
+from datetime import datetime, timedelta, timezone
+from collections import Counter
+from typing import Optional
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Form
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+import httpx
 
 from config import settings
-from auth import verify_totp, create_session, validate_session, destroy_session
-from fetcher import aggregator
-from websocket_manager import ws_manager
-
-# ── Logging ──────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s │ %(name)-28s │ %(levelname)-5s │ %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("soc_dashboard.app")
-
-# ── Paths ────────────────────────────────────────────────────
-BASE_DIR = Path(__file__).parent
-TEMPLATES_DIR = BASE_DIR / "templates"
-STATIC_DIR = BASE_DIR / "static"
-
-# ── Background task control ──────────────────────────────────
-_bg_task: asyncio.Task | None = None
-
-
-async def _background_fetcher():
-    """Background loop: fetch data every REFRESH_INTERVAL seconds, broadcast via WS."""
-    logger.info(f"Background fetcher started (interval: {settings.REFRESH_INTERVAL}s)")
-    while True:
-        try:
-            state = await aggregator.fetch_all()
-            await ws_manager.broadcast(state.model_dump())
-            logger.info(
-                f"Broadcast: {state.total_clients} clients, "
-                f"{ws_manager.active_count} WS connections"
-            )
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Background fetch error: {e}")
-
-        await asyncio.sleep(settings.REFRESH_INTERVAL)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Startup/shutdown lifecycle."""
-    global _bg_task
-    # ── Configuration diagnostics ──────────────────────────
-    logger.info(f"S1 configured : {settings.s1_configured()} | token length: {len(settings.S1_API_TOKEN)}")
-    logger.info(f"AV configured : {settings.av_configured()} | client_id: '{settings.AV_CLIENT_ID}'")
-    logger.info(f"TOTP configured: {settings.totp_configured()}")
-    # Start background fetcher
-    _bg_task = asyncio.create_task(_background_fetcher())
-    logger.info("═══ Sentrium SOC Dashboard started ═══")
-    yield
-    # Shutdown
-    if _bg_task:
-        _bg_task.cancel()
-        try:
-            await _bg_task
-        except asyncio.CancelledError:
-            pass
-    await aggregator.close()
-    logger.info("═══ Sentrium SOC Dashboard stopped ═══")
-
-
-# ── FastAPI App ──────────────────────────────────────────────
-app = FastAPI(
-    title="Sentrium Integrated SOC Dashboard",
-    version="1.0.0",
-    lifespan=lifespan,
+from models import (
+    DashboardState, ClientSummary, PlatformStatus,
+    AlertItem, TimePoint, ThreatClassification,
 )
 
-# Mount static files
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-# Templates
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-
+logger = logging.getLogger("soc_dashboard.fetcher")
 
 # ════════════════════════════════════════════════════════════════
-#  Auth helpers
+#  SentinelOne Async Fetcher
 # ════════════════════════════════════════════════════════════════
 
-SESSION_COOKIE = "sentrium_session"
+class S1Fetcher:
+    """Async SentinelOne API v2.1 client."""
 
+    def __init__(self):
+        self.base_url = settings.S1_BASE_URL.rstrip("/")
+        self._client: Optional[httpx.AsyncClient] = None
 
-def _get_session_token(request: Request) -> str | None:
-    return request.cookies.get(SESSION_COOKIE)
-
-
-def _is_authenticated(request: Request) -> bool:
-    return validate_session(_get_session_token(request))
-
-
-# ════════════════════════════════════════════════════════════════
-#  Routes
-# ════════════════════════════════════════════════════════════════
-
-@app.get("/", response_class=HTMLResponse)
-async def client_grid(request: Request):
-    """Client Grid overview — shows all clients as clickable cards."""
-    if not _is_authenticated(request):
-        return RedirectResponse(url="/login", status_code=302)
-
-    host = request.headers.get("host", "localhost:8080")
-    proto = request.headers.get("x-forwarded-proto", "http")
-    ws_scheme = "wss" if proto == "https" else "ws"
-    return templates.TemplateResponse(
-        request=request,
-        name="clients.html",
-        context={
-            "ws_url": f"{ws_scheme}://{host}/ws",
-        },
-    )
-
-
-@app.get("/client/{client_name}", response_class=HTMLResponse)
-async def client_dashboard(request: Request, client_name: str):
-    """Per-client SOC dashboard — detailed view for a specific client."""
-    if not _is_authenticated(request):
-        return RedirectResponse(url="/login", status_code=302)
-
-    from urllib.parse import unquote
-    decoded_name = unquote(client_name)
-
-    host = request.headers.get("host", "localhost:8080")
-    proto = request.headers.get("x-forwarded-proto", "http")
-    ws_scheme = "wss" if proto == "https" else "ws"
-    return templates.TemplateResponse(
-        request=request,
-        name="index.html",
-        context={
-            "refresh_interval": settings.REFRESH_INTERVAL,
-            "ws_url": f"{ws_scheme}://{host}/ws",
-            "client_name": decoded_name,
-        },
-    )
-
-
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
-    """Login page with TOTP."""
-    if _is_authenticated(request):
-        return RedirectResponse(url="/", status_code=302)
-
-    return templates.TemplateResponse(
-        request=request,
-        name="login.html",
-        context={
-            "error": None,
-            "totp_configured": settings.totp_configured(),
-        },
-    )
-
-
-@app.post("/login", response_class=HTMLResponse)
-async def login_submit(request: Request, totp_code: str = Form(...)):
-    """Handle TOTP login form submission."""
-    if verify_totp(totp_code.strip()):
-        token = create_session()
-        response = RedirectResponse(url="/", status_code=302)
-        response.set_cookie(
-            key=SESSION_COOKIE,
-            value=token,
-            httponly=True,
-            samesite="lax",
-            max_age=settings.SESSION_TIMEOUT_MINUTES * 60,
+    def _make_client(self) -> httpx.AsyncClient:
+        """Always create a fresh client with up-to-date credentials."""
+        return httpx.AsyncClient(
+            headers={
+                "Authorization": f"ApiToken {settings.S1_API_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            timeout=httpx.Timeout(45.0, connect=15.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=5),
         )
-        logger.info("User authenticated via TOTP")
-        return response
 
-    return templates.TemplateResponse(
-        request=request,
-        name="login.html",
-        context={
-            "error": "Invalid verification code. Please try again.",
-            "totp_configured": settings.totp_configured(),
-        },
-    )
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Return a healthy client, recreating if needed."""
+        if self._client is None or self._client.is_closed:
+            self._client = self._make_client()
+        return self._client
 
+    async def _reset_client(self):
+        """Force-close and recreate the client."""
+        if self._client and not self._client.is_closed:
+            try:
+                await self._client.aclose()
+            except Exception:
+                pass
+        self._client = self._make_client()
+        return self._client
 
-@app.get("/logout")
-async def logout(request: Request):
-    """Logout and destroy session."""
-    destroy_session(_get_session_token(request))
-    response = RedirectResponse(url="/login", status_code=302)
-    response.delete_cookie(SESSION_COOKIE)
-    return response
+    async def close(self):
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
 
+    async def _paginate(self, endpoint: str, params: dict = None, max_items: int = 5000) -> list[dict]:
+        """Fetch all pages from a cursor-paginated endpoint."""
+        client = await self._get_client()
+        if params is None:
+            params = {}
+        params = {**params, "limit": 200}
+        all_items = []
+        cursor = None
 
-# ════════════════════════════════════════════════════════════════
-#  REST API (fallback for non-WS clients)
-# ════════════════════════════════════════════════════════════════
-
-@app.get("/api/state")
-async def api_state(request: Request):
-    """Get current dashboard state as JSON."""
-    if not _is_authenticated(request):
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    state = aggregator.cached_state
-    if state:
-        return JSONResponse(state.model_dump())
-    return JSONResponse({"error": "No data yet. Waiting for first fetch cycle."}, status_code=503)
-
-
-@app.get("/api/health")
-async def health():
-    """Health check endpoint."""
-    return {
-        "status": "ok",
-        "s1_configured": settings.s1_configured(),
-        "av_configured": settings.av_configured(),
-        "ws_connections": ws_manager.active_count,
-    }
-
-
-@app.get("/api/debug/av")
-async def debug_av(request: Request):
-    """
-    DEBUG ONLY: Fetch raw AlienVault sensors and first 5 alarms.
-    Shows the exact JSON fields returned by AV so we can fix the mapping.
-    Remove this endpoint after field names are confirmed.
-    """
-    if not _is_authenticated(request):
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    try:
-        sensors = await aggregator.av.fetch_sensors()
-        alarms  = await aggregator.av.fetch_alarms(days_back=1)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-    # Return the first 5 alarms in full so we can see every field
-    sample_alarms = alarms[:5] if alarms else []
-
-    return JSONResponse({
-        "sensor_count": len(sensors),
-        "alarm_count":  len(alarms),
-        "sensors_sample": sensors[:5],
-        "alarms_sample":  sample_alarms,
-        "alarm_keys": list(sample_alarms[0].keys()) if sample_alarms else [],
-    })
-
-
-# ════════════════════════════════════════════════════════════════
-#  WebSocket
-# ════════════════════════════════════════════════════════════════
-
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    """WebSocket endpoint for real-time dashboard updates."""
-    await ws_manager.connect(ws)
-
-    # Send cached state immediately on connect
-    if aggregator.cached_state:
-        await ws_manager.send_to(ws, aggregator.cached_state.model_dump())
-
-    try:
         while True:
-            # Keep connection alive by receiving messages (ping/pong)
-            data = await ws.receive_text()
-            # Handle client messages (e.g., select_client)
-            if data.startswith("select:"):
-                client_name = data[7:].strip()
-                await _send_client_detail(ws, client_name)
-    except WebSocketDisconnect:
-        ws_manager.disconnect(ws)
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                resp = await client.get(f"{self.base_url}/{endpoint}", params=params)
+                if resp.status_code == 401:
+                    logger.error(f"S1 Auth failed on {endpoint} — token may be expired")
+                    break
+                if resp.status_code != 200:
+                    logger.warning(f"S1 {endpoint} returned {resp.status_code}")
+                    break
+
+                body = resp.json()
+                data = body.get("data", body)
+                if isinstance(data, dict) and "sites" in data:
+                    data = data["sites"]
+                if isinstance(data, list):
+                    all_items.extend(data)
+
+                if len(all_items) >= max_items:
+                    all_items = all_items[:max_items]
+                    break
+
+                pagination = body.get("pagination", {}) or {}
+                cursor = pagination.get("nextCursor")
+                if not cursor:
+                    break
+
+                await asyncio.sleep(0.02)
+
+            except httpx.RequestError as e:
+                logger.warning(f"S1 network error on {endpoint}: {e} — retrying with fresh client")
+                client = await self._reset_client()
+                try:
+                    resp = await client.get(f"{self.base_url}/{endpoint}", params=params)
+                    if resp.status_code == 200:
+                        body = resp.json()
+                        data = body.get("data", body)
+                        if isinstance(data, dict) and "sites" in data:
+                            data = data["sites"]
+                        if isinstance(data, list):
+                            all_items.extend(data)
+                        pagination = body.get("pagination", {}) or {}
+                        cursor = pagination.get("nextCursor")
+                        if not cursor:
+                            break
+                    else:
+                        logger.error(f"S1 retry failed on {endpoint}: {resp.status_code}")
+                        break
+                except Exception as retry_e:
+                    logger.error(f"S1 retry error on {endpoint}: {retry_e}")
+                    break
+
+        return all_items
+
+    async def discover_sites(self) -> list[dict]:
+        """Auto-discover all sites (clients) from SentinelOne."""
+        if not settings.s1_configured():
+            return []
+        try:
+            sites = await self._paginate("sites")
+            logger.info(f"S1: Discovered {len(sites)} sites")
+            return sites
+        except Exception as e:
+            logger.error(f"S1 site discovery failed: {e}")
+            return []
+
+    async def fetch_agents(self, site_id: str) -> list[dict]:
+        """Fetch all agents/endpoints for a site."""
+        return await self._paginate("agents", {"siteIds": site_id, "limit": 1000})
+
+    async def fetch_threats(self, site_id: str, days_back: int = 30) -> list[dict]:
+        """Fetch threats for a site within the last N days."""
+        now = datetime.now(timezone.utc)
+        start = (now - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return await self._paginate("threats", {
+            "siteIds": site_id,
+            "createdAt__gte": start,
+            "createdAt__lte": end,
+            "sortBy": "createdAt",
+            "sortOrder": "desc",
+        })
+
+    async def fetch_alerts(self, site_id: str, days_back: int = 7) -> list[dict]:
+        """Fetch cloud detection alerts for a site."""
+        now = datetime.now(timezone.utc)
+        start = (now - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return await self._paginate("cloud-detection/alerts", {
+            "siteIds": site_id,
+            "createdAt__gte": start,
+            "createdAt__lte": end,
+            "sortBy": "createdAt",
+            "sortOrder": "desc",
+        }, max_items=200)
+
+
+# ════════════════════════════════════════════════════════════════
+#  AlienVault Async Fetcher
+# ════════════════════════════════════════════════════════════════
+
+class AVFetcher:
+    """Async AlienVault USM Anywhere API client (deployments-based)."""
+
+    def __init__(self):
+        self.subdomain = settings.AV_SUBDOMAIN
+        self.base_url = f"https://{self.subdomain}"
+        self._token: Optional[str] = None
+        self._token_expiry: float = 0
+        self._dep_tokens: dict = {}      # dep_url -> {token, expiry}
+        self._deployments: list = []     # cached deployment list
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                verify=False,
+                timeout=httpx.Timeout(60.0, connect=15.0),
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=5),
+            )
+        return self._client
+
+    async def close(self):
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+
+    async def _get_token(self) -> Optional[str]:
+        """Get or refresh the central OAuth2 token, trying multiple endpoints."""
+        if self._token and time.time() < self._token_expiry:
+            return self._token
+
+        client = await self._get_client()
+        base = self.base_url.rstrip("/")
+        for ep in ("/api/1.1/oauth/token", "/api/2.0/oauth/token", "/api/1.0/oauth/token"):
+            try:
+                resp = await client.post(
+                    base + ep,
+                    data={"grant_type": "client_credentials"},
+                    auth=(settings.AV_CLIENT_ID, settings.AV_CLIENT_SECRET),
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    self._token = data.get("access_token")
+                    self._token_expiry = time.time() + int(data.get("expires_in", 3600)) - 60
+                    logger.info(f"AV: Token acquired via {ep}")
+                    return self._token
+                logger.warning(f"AV auth {ep} → HTTP {resp.status_code}")
+            except Exception as e:
+                logger.warning(f"AV auth {ep} → {e}")
+        logger.error("AV: All auth endpoints failed")
+        return None
+
+    def _resolve_deployment_url(self, dep: dict) -> Optional[str]:
+        """Extract a usable base URL from a deployment object."""
+        for key in ("url", "fqdn", "hostname", "base_url"):
+            val = dep.get(key, "")
+            if val:
+                return (f"https://{val}" if not val.startswith("http") else val).rstrip("/")
+        self_link = dep.get("_links", {}).get("self", {}).get("href", "")
+        if self_link and "alienvault.cloud" in self_link:
+            from urllib.parse import urlparse as _up
+            p = _up(self_link)
+            if p.scheme and p.netloc:
+                return f"{p.scheme}://{p.netloc}"
+        dep_id = dep.get("id", "")
+        if dep_id and "://" in dep_id:
+            return f"https://{dep_id.split('://')[1].split('/')[0]}"
+        name = dep.get("name", "")
+        if name and ".alienvault.cloud" in name:
+            return (f"https://{name}" if not name.startswith("http") else name).rstrip("/")
+        return None
+
+    async def _get_deployment_token(self, dep_url: str) -> Optional[str]:
+        """Authenticate against a specific deployment and cache the token."""
+        cached = self._dep_tokens.get(dep_url)
+        if cached and time.time() < cached["expiry"]:
+            return cached["token"]
+        client = await self._get_client()
+        for ep in ("/api/2.0/oauth/token", "/api/1.1/oauth/token"):
+            try:
+                resp = await client.post(
+                    dep_url.rstrip("/") + ep,
+                    data={"grant_type": "client_credentials"},
+                    auth=(settings.AV_CLIENT_ID, settings.AV_CLIENT_SECRET),
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    token = data.get("access_token")
+                    self._dep_tokens[dep_url] = {
+                        "token": token,
+                        "expiry": time.time() + int(data.get("expires_in", 3600)) - 300,
+                    }
+                    return token
+            except Exception:
+                continue
+        return None
+
+    async def fetch_deployments(self) -> list[dict]:
+        """Fetch all client deployments from AlienVault USM Central."""
+        if not settings.av_configured():
+            return []
+        if self._deployments:
+            return self._deployments
+        token = await self._get_token()
+        if not token:
+            return []
+        client = await self._get_client()
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        for path in ("/api/1.1/deployments", "/api/2.0/deployments"):
+            try:
+                resp = await client.get(self.base_url.rstrip("/") + path, headers=headers, timeout=30)
+                logger.info(f"AV deployments {path} → HTTP {resp.status_code}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    deps = (
+                        data.get("_embedded", {}).get("deployments")
+                        or data.get("deployments")
+                        or (data if isinstance(data, list) else [])
+                    )
+                    for d in deps:
+                        d["_resolved_url"] = self._resolve_deployment_url(d)
+                    valid = [d for d in deps if d.get("_resolved_url")]
+                    logger.info(f"AV: Found {len(valid)} deployments with usable URLs")
+                    self._deployments = valid
+                    return valid
+            except Exception as e:
+                logger.warning(f"AV deployments {path} → {e}")
+        logger.warning("AV: No deployments found — will use central URL as fallback")
+        return []
+
+    async def _fetch_alarms_one(self, dep_url: str, dep_name: str, central_token: str, days_back: int) -> list[dict]:
+        """Fetch all alarm pages from one deployment, tagging each with _deployment_name."""
+        client = await self._get_client()
+        token = (await self._get_deployment_token(dep_url)) or central_token
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        now = datetime.now(timezone.utc)
+        start_ms = int((now - timedelta(days=days_back + 30)).timestamp() * 1000)
+        end_ms   = int(now.timestamp() * 1000)
+        url = dep_url.rstrip("/") + "/api/2.0/alarms"
+        params = {"timestamp_occured_gte": start_ms, "timestamp_occured_lte": end_ms,
+                  "sort": "timestamp_occured,desc", "size": 500, "page": 0}
+        all_alarms: list[dict] = []
+        try:
+            resp = await client.get(url, headers=headers, params=params, timeout=30)
+            if resp.status_code != 200:
+                logger.warning(f"AV alarms {dep_name} → HTTP {resp.status_code}")
+                return []
+            body = resp.json()
+            total_pages = body.get("page", {}).get("totalPages", 1)
+            batch = body.get("_embedded", {}).get("alarms", [])
+            for a in batch:
+                a["_deployment_name"] = dep_name
+            all_alarms.extend(batch)
+            if total_pages > 1:
+                async def _page(pg: int) -> list[dict]:
+                    try:
+                        r = await client.get(url, headers=headers,
+                                             params={**params, "page": pg}, timeout=30)
+                        if r.status_code == 200:
+                            items = r.json().get("_embedded", {}).get("alarms", [])
+                            for a in items:
+                                a["_deployment_name"] = dep_name
+                            return items
+                    except Exception:
+                        pass
+                    return []
+                pages = await asyncio.gather(
+                    *[_page(p) for p in range(1, min(total_pages, 20))],
+                    return_exceptions=True,
+                )
+                for r in pages:
+                    if isinstance(r, list):
+                        all_alarms.extend(r)
+        except Exception as e:
+            logger.error(f"AV alarm fetch {dep_name}: {e}")
+        logger.info(f"AV: {dep_name} → {len(all_alarms)} alarms")
+        return all_alarms
+
+    async def fetch_alarms_per_deployment(self, days_back: int = 30) -> dict[str, list]:
+        """
+        Fetch alarms from ALL deployments in parallel.
+        Returns {deployment_name: [alarms]} — one entry per client.
+        Falls back to central-only if no deployments are found.
+        """
+        if not settings.av_configured():
+            return {}
+        central_token = await self._get_token()
+        if not central_token:
+            return {}
+        deployments = await self.fetch_deployments()
+        if not deployments:
+            logger.info("AV: No deployments — fetching from central URL as single client")
+            name = _fallback_av_client_name()
+            alarms = await self._fetch_alarms_one(self.base_url, name, central_token, days_back)
+            return {name: alarms} if alarms else {}
+        results = await asyncio.gather(
+            *[self._fetch_alarms_one(d["_resolved_url"], d.get("name", "Unknown"),
+                                     central_token, days_back)
+              for d in deployments],
+            return_exceptions=True,
+        )
+        out: dict[str, list] = {}
+        for dep, res in zip(deployments, results):
+            name = dep.get("name", "Unknown")
+            if isinstance(res, list) and res:
+                out[name] = res
+            elif isinstance(res, Exception):
+                logger.error(f"AV {name}: {res}")
+        logger.info(f"AV: Deployments with alarms: {list(out.keys())}")
+        return out
+
+    async def fetch_alarms(self, days_back: int = 30) -> list[dict]:
+        """Flat alarm list (used by debug endpoint)."""
+        all_alarms: list[dict] = []
+        for alarms in (await self.fetch_alarms_per_deployment(days_back)).values():
+            all_alarms.extend(alarms)
+        return all_alarms
+
+    async def fetch_events(self, days_back: int = 1) -> list[dict]:
+        """Fetch events from central URL (summary use only)."""
+        if not settings.av_configured():
+            return []
+        token = await self._get_token()
+        if not token:
+            return []
+        client = await self._get_client()
+        now = datetime.now(timezone.utc)
+        start_ms = int((now - timedelta(days=days_back)).timestamp() * 1000)
+        end_ms   = int(now.timestamp() * 1000)
+        try:
+            resp = await client.get(
+                self.base_url.rstrip("/") + "/api/2.0/events",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"timestamp_received_gte": start_ms, "timestamp_received_lte": end_ms,
+                        "sort": "timestamp_received,desc", "size": 500, "page": 0},
+            )
+            if resp.status_code == 200:
+                return resp.json().get("_embedded", {}).get("eventResources", [])
+        except Exception as e:
+            logger.warning(f"AV events: {e}")
+        return []
+
+    async def fetch_sensors(self) -> list[dict]:
+        """Legacy — returns deployments as sensor objects for compatibility."""
+        return await self.fetch_deployments()
+
+
+
+# ════════════════════════════════════════════════════════════════
+#  Dashboard Aggregator
+# ════════════════════════════════════════════════════════════════
+
+class DashboardAggregator:
+    """
+    Combines data from both platforms into a unified dashboard state.
+    Runs as a background task, caching results in memory.
+    """
+
+    def __init__(self):
+        self.s1 = S1Fetcher()
+        self.av = AVFetcher()
+        self._cache: Optional[DashboardState] = None
+        self._lock = asyncio.Lock()
+        self._running = False
+
+    @property
+    def cached_state(self) -> Optional[DashboardState]:
+        return self._cache
+
+    async def close(self):
+        await self.s1.close()
+        await self.av.close()
+
+    async def fetch_all(self) -> DashboardState:
+        """
+        Unified multi-client fetch:
+        1. Discover ALL S1 sites + ALL AV sensors in parallel
+        2. Fetch per-site S1 data + all AV alarms/events in parallel
+        3. Group AV alarms/events by sensor UUID → client name
+        4. Fuzzy-merge AV clients into S1 clients (or create AV-only cards)
+        5. Build global KPIs
+        """
+        async with self._lock:
+            t0 = time.time()
+            logger.info("Starting data fetch cycle...")
+
+            # ── Phase 1: Parallel discovery ──────────────────────────────
+            s1_sites, av_sensors = await asyncio.gather(
+                self.s1.discover_sites(),
+                self.av.fetch_sensors(),
+                return_exceptions=True,
+            )
+            if isinstance(s1_sites, Exception):
+                logger.error(f"S1 discovery error: {s1_sites}")
+                s1_sites = []
+            if isinstance(av_sensors, Exception):
+                logger.warning(f"AV sensor discovery error: {av_sensors}")
+                av_sensors = []
+
+            logger.info(f"Discovery: {len(s1_sites)} S1 sites, {len(av_sensors)} AV sensors")
+
+            # ── Phase 2: Parallel data fetch ───────────────────────────────
+            valid_s1_sites = [s for s in s1_sites if s.get("id")]
+            s1_build_tasks = [
+                self._build_s1_client(str(s["id"]), s.get("name", "Unknown"))
+                for s in valid_s1_sites
+            ]
+            all_results = await asyncio.gather(
+                *s1_build_tasks,
+                self.av.fetch_alarms_per_deployment(days_back=30),
+                self.av.fetch_events(days_back=1),
+                return_exceptions=True,
+            )
+
+            n_s1 = len(s1_build_tasks)
+            s1_results       = all_results[:n_s1]
+            av_per_dep_raw   = all_results[n_s1]   if not isinstance(all_results[n_s1],   Exception) else {}
+            av_events_raw    = all_results[n_s1+1] if not isinstance(all_results[n_s1+1], Exception) else []
+
+            if isinstance(av_per_dep_raw, Exception):
+                logger.error(f"AV per-deployment fetch error: {av_per_dep_raw}"); av_per_dep_raw = {}
+            if isinstance(av_events_raw, Exception):
+                logger.error(f"AV events error: {av_events_raw}"); av_events_raw = []
+
+            # ── Phase 3: Build S1 client index ───────────────────────────
+            clients: dict[str, ClientSummary] = {}
+            for result, site in zip(s1_results, valid_s1_sites):
+                if isinstance(result, ClientSummary):
+                    key = _normalize_name(result.name)
+                    clients[key] = result
+                else:
+                    logger.error(f"S1 build error for '{site.get('name')}': {result}")
+
+            # ── Phase 4: Merge AV deployments into S1 clients (or create AV-only) ──
+            # av_per_dep_raw = {dep_name: [alarms], ...} — each key IS the client name
+            total_av_alarms = sum(len(v) for v in av_per_dep_raw.values())
+            logger.info(f"AV: {len(av_per_dep_raw)} deployments, {total_av_alarms} total alarms")
+            logger.info(f"AV: deployment names: {list(av_per_dep_raw.keys())}")
+
+            for dep_name, alarms in av_per_dep_raw.items():
+                norm_dep = _normalize_name(dep_name)
+                s1_match = _find_best_match(norm_dep, list(clients.keys()), raw_av_name=dep_name)
+
+                if s1_match:
+                    _merge_av_data(clients[s1_match], alarms, [])
+                    logger.info(f"AV: '{dep_name}' merged → S1 '{clients[s1_match].name}'")
+                else:
+                    clean_name = dep_name.replace("-", " ").title()
+                    av_only = self._build_av_summary(alarms, [], clean_name)
+                    clients[norm_dep] = av_only
+                    logger.info(f"AV: '{dep_name}' → standalone AV-only card")
+
+
+            client_list = list(clients.values())
+
+            # ── Phase 7: Global KPIs ──────────────────────────────────────
+            global_endpoints = sum(c.total_endpoints for c in client_list)
+            global_threats   = sum(c.total_threats   for c in client_list)
+            global_alerts    = sum(c.total_alerts    for c in client_list)
+            global_events    = sum(c.events_processed for c in client_list)
+            global_blocked   = sum(c.blocked_attempts for c in client_list)
+            global_dfir      = sum(c.dfir_cases       for c in client_list)
+
+            all_class_counts: Counter = Counter()
+            for c in client_list:
+                for tc in c.threat_classifications:
+                    all_class_counts[tc.name] += tc.count
+
+            classification_colors = {
+                "Malware":    "#3B82F6", "Ransomware":  "#EF4444",
+                "Trojan":     "#F97316", "PUP":         "#22C55E",
+                "Cryptominer":"#8B5CF6", "Infostealer": "#EC4899",
+                "Packed":     "#F59E0B", "General":     "#6B7280",
+                "Malicious":  "#EF4444", "Suspicious":  "#F59E0B",
+            }
+            global_classifications = [
+                ThreatClassification(
+                    name=name, count=count,
+                    color=classification_colors.get(name, "#6B7280"),
+                )
+                for name, count in all_class_counts.most_common(10)
+            ]
+
+            all_alerts: list[AlertItem] = []
+            for c in client_list:
+                all_alerts.extend(c.recent_alerts)
+            all_alerts = sorted(all_alerts, key=lambda a: a.time, reverse=True)[:20]
+
+            global_timeline = self._build_global_timeline(client_list)
+
+            status = "operational"
+            if not settings.s1_configured() and not settings.av_configured():
+                status = "unconfigured"
+            elif not s1_sites and not av_alarms_raw:
+                status = "degraded"
+
+            state = DashboardState(
+                last_updated=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                refresh_interval=settings.REFRESH_INTERVAL,
+                total_clients=len(client_list),
+                system_status=status,
+                global_endpoints=global_endpoints,
+                global_threats=global_threats,
+                global_alerts=global_alerts,
+                global_events=global_events,
+                global_blocked=global_blocked,
+                global_dfir_cases=global_dfir,
+                sectors_affected=len(client_list),
+                clients=client_list,
+                global_classifications=global_classifications,
+                global_alerts_list=all_alerts,
+                global_timeline=global_timeline,
+            )
+
+            self._cache = state
+            elapsed = time.time() - t0
+            logger.info(f"Fetch cycle complete: {len(client_list)} clients, {elapsed:.2f}s")
+            return state
+
+    async def _build_s1_client(self, site_id: str, site_name: str) -> ClientSummary:
+        """Build client summary from SentinelOne data — 24h threat window."""
+        agents, threats_24h = await asyncio.gather(
+            self.s1.fetch_agents(site_id),
+            self.s1.fetch_threats(site_id, days_back=1),   # 24 hours only
+            return_exceptions=True,
+        )
+
+        if isinstance(agents, Exception):
+            logger.warning(f"S1 agents error for {site_name}: {agents}")
+            agents = []
+        if isinstance(threats_24h, Exception):
+            logger.warning(f"S1 threats error for {site_name}: {threats_24h}")
+            threats_24h = []
+
+        logger.info(f"S1 [{site_name}]: {len(agents)} endpoints, {len(threats_24h)} threats (24h)")
+
+        # ── Threat classifications from 24h threats ──
+        class_counter = Counter()
+        for t in threats_24h:
+            ti = t.get("threatInfo", {})
+            confidence = ti.get("confidenceLevel", "").title()   # Malicious / Suspicious
+            if confidence:
+                class_counter[confidence] += 1
+
+        classification_colors = {
+            "Malicious":  "#EF4444",
+            "Suspicious": "#F59E0B",
+            "Malware":    "#3B82F6",
+            "Ransomware": "#EF4444",
+            "Trojan":     "#F97316",
+            "PUP":        "#22C55E",
+            "Cryptominer":"#8B5CF6",
+            "General":    "#6B7280",
+        }
+
+        classifications = [
+            ThreatClassification(
+                name=name,
+                count=count,
+                color=classification_colors.get(name, "#6B7280"),
+            )
+            for name, count in class_counter.most_common(10)
+        ]
+
+        # ── Map analyst verdict to human-readable label ──
+        VERDICT_MAP = {
+            "true_positive":  "True Positive",
+            "false_positive": "False Positive",
+            "suspicious":     "Suspicious",
+            "undefined":      "Undefined",
+            "":               "Pending",
+        }
+
+        # ── Map incident status to human-readable label ──
+        STATUS_MAP = {
+            "unresolved": "Unresolved",
+            "in_progress": "In Progress",
+            "resolved":    "Resolved",
+            "":            "Unknown",
+        }
+
+        # ── Build alerts table from 24h threats ──
+        recent_alerts: list[AlertItem] = []
+        for t in threats_24h:
+            ti  = t.get("threatInfo", {})
+            ari = t.get("agentRealtimeInfo", {})
+
+            threat_name = (
+                ti.get("threatName")
+                or ti.get("filePath", "").split("\\")[-1].split("/")[-1]
+                or "Unknown Threat"
+            )
+
+            # Use S1's native description fields (already human-readable)
+            confidence_raw   = (ti.get("confidenceLevel", "") or "").lower()
+            confidence_label = confidence_raw.title() if confidence_raw else "Unknown"
+            severity         = "critical" if confidence_raw == "malicious" else "medium"
+
+            verdict_label    = ti.get("analystVerdictDescription", "") or "Pending"
+            status_label     = ti.get("incidentStatusDescription", "") or "Unknown"
+
+            created  = ti.get("createdAt", "")
+            endpoint = ari.get("agentComputerName", "")
+
+            # Detecting engine
+            engines = ti.get("engines", [])
+            engine  = engines[0] if engines else ""
+
+            recent_alerts.append(AlertItem(
+                id=f"S1-{str(t.get('id', ''))[:6]}",
+                alert_type=threat_name,
+                source=endpoint,
+                severity=severity,
+                confidence=confidence_label,
+                analyst_verdict=verdict_label,
+                status=status_label,
+                time=_format_relative_time(created),
+                reported_at=_format_exact_time(created),
+                platform="SentinelOne",
+            ))
+
+        # ── KPIs ──
+        blocked = 0
+        for t in threats_24h:
+            m = str(t.get("threatInfo", {}).get("mitigationStatusDescription", "")).lower()
+            if "mitigated" in m and "not" not in m:
+                blocked += 1
+        dfir = sum(
+            1 for t in threats_24h
+            if t.get("threatInfo", {}).get("incidentStatus", "") in ("unresolved", "in_progress")
+        )
+
+        timeline = _build_hourly_timeline(threats_24h)
+
+        return ClientSummary(
+            name=site_name,
+            platforms=["SentinelOne"],
+            s1_site_id=site_id,
+            total_endpoints=len(agents),
+            total_threats=len(threats_24h),
+            total_alerts=len(threats_24h),   # 24h threat count as alerts
+            events_processed=len(agents) * 1000 + len(threats_24h) * 50,
+            blocked_attempts=blocked,
+            dfir_cases=dfir,
+            threat_classifications=classifications,
+            recent_alerts=recent_alerts[:50],
+            event_timeline=timeline,
+            platform_data=[
+                PlatformStatus(
+                    platform="SentinelOne",
+                    is_active=True,
+                    total_endpoints=len(agents),
+                    total_threats=len(threats_24h),
+                    total_alerts=len(threats_24h),
+                    events_processed=len(agents) * 1000,
+                    blocked_attempts=blocked,
+                ),
+            ],
+        )
+
+    def _build_av_summary(self, alarms: list[dict], events: list[dict], name: str) -> ClientSummary:
+        """Build client summary from AlienVault data."""
+        # Severity breakdown
+        severity_map = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        for a in alarms:
+            label = str(a.get("priority_label", "")).lower()
+            if label in severity_map:
+                severity_map[label] += 1
+
+        # Build classifications from rule methods
+        method_counter = Counter()
+        for a in alarms:
+            method = a.get("rule_method", "Unknown")
+            if method:
+                method_counter[method] += 1
+
+        classifications = [
+            ThreatClassification(name=name, count=count, color="#F97316")
+            for name, count in method_counter.most_common(5)
+        ]
+
+        # Recent alerts
+        recent_alerts = []
+        for a in alarms[:10]:
+            sev_label = str(a.get("priority_label", "medium")).lower()
+            if sev_label not in ("critical", "high", "medium", "low"):
+                sev_label = "medium"
+
+            recent_alerts.append(AlertItem(
+                id=f"AV-{str(a.get('uuid', ''))[:6]}",
+                alert_type=a.get("rule_method", "Alarm"),
+                source=a.get("source_name", a.get("sensor", "AlienVault")),
+                severity=sev_label,
+                time=_format_timestamp_ms(a.get("timestamp_received")),
+                status="active" if a.get("status") == "open" else "investigating",
+                platform="AlienVault",
+            ))
+
+        return ClientSummary(
+            name=name,
+            platforms=["AlienVault"],
+            total_endpoints=0,
+            total_threats=severity_map.get("critical", 0) + severity_map.get("high", 0),
+            total_alerts=len(alarms),
+            events_processed=len(events),
+            blocked_attempts=severity_map.get("critical", 0),
+            dfir_cases=0,
+            threat_classifications=classifications,
+            recent_alerts=recent_alerts,
+            event_timeline=[],
+            platform_data=[
+                PlatformStatus(
+                    platform="AlienVault",
+                    is_active=True,
+                    total_endpoints=0,
+                    total_threats=len(alarms),
+                    total_alerts=len(alarms),
+                    events_processed=len(events),
+                    blocked_attempts=severity_map.get("critical", 0),
+                ),
+            ],
+        )
+
+    def _build_global_timeline(self, clients: list[ClientSummary]) -> list[TimePoint]:
+        """Merge all client timelines into a global 24hr timeline."""
+        # Create 24 hourly buckets
+        now = datetime.now(timezone.utc)
+        buckets: dict[str, dict] = {}
+        for i in range(24):
+            t = now - timedelta(hours=23 - i)
+            key = t.strftime("%H:00")
+            buckets[key] = {"value": 0, "blocked": 0}
+
+        for c in clients:
+            for tp in c.event_timeline:
+                if tp.timestamp in buckets:
+                    buckets[tp.timestamp]["value"] += tp.value
+                    buckets[tp.timestamp]["blocked"] += tp.blocked
+
+        return [
+            TimePoint(timestamp=ts, value=d["value"], blocked=d["blocked"])
+            for ts, d in buckets.items()
+        ]
+
+
+# ════════════════════════════════════════════════════════════════
+#  Helpers
+# ════════════════════════════════════════════════════════════════
+
+def _format_relative_time(iso_str: str) -> str:
+    """Convert ISO datetime to relative time string."""
+    if not iso_str:
+        return "Unknown"
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        delta = now - dt
+
+        if delta.total_seconds() < 60:
+            return "just now"
+        elif delta.total_seconds() < 3600:
+            mins = int(delta.total_seconds() / 60)
+            return f"{mins} min ago"
+        elif delta.total_seconds() < 86400:
+            hours = int(delta.total_seconds() / 3600)
+            return f"{hours}h ago"
+        else:
+            days = int(delta.total_seconds() / 86400)
+            return f"{days}d ago"
     except Exception:
-        ws_manager.disconnect(ws)
+        return iso_str[:16] if len(iso_str) > 16 else iso_str
 
 
-async def _send_client_detail(ws: WebSocket, client_name: str):
-    """Send detailed data for a specific client."""
-    state = aggregator.cached_state
-    if not state:
-        return
+def _format_timestamp_ms(ts_ms) -> str:
+    """Convert millisecond timestamp to relative time."""
+    if not ts_ms:
+        return "Unknown"
+    try:
+        dt = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc)
+        return _format_relative_time(dt.isoformat())
+    except Exception:
+        return "Unknown"
 
-    for client in state.clients:
-        if client.name.lower() == client_name.lower():
-            await ws_manager.send_to(ws, {
-                "type": "client_detail",
-                "client": client.model_dump(),
-            })
-            return
+def _format_exact_time(iso_str: str) -> str:
+    """Format ISO timestamp as 'Apr 13th 2026 • 20:03' matching S1 UI."""
+    if not iso_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        day = dt.day
+        suffix = "th" if 11 <= day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+        month = dt.strftime("%b")
+        return f"{month} {day}{suffix} {dt.year} • {dt.strftime('%H:%M')}"
+    except Exception:
+        return iso_str[:16] if len(iso_str) > 16 else iso_str
 
-    await ws_manager.send_to(ws, {
-        "type": "error",
-        "message": f"Client '{client_name}' not found",
-    })
+def _build_hourly_timeline(threats: list[dict]) -> list[TimePoint]:
+    """Build 24-hour timeline from threat data."""
+    now = datetime.now(timezone.utc)
+    buckets: dict[str, dict] = {}
+    for i in range(24):
+        t = now - timedelta(hours=23 - i)
+        key = t.strftime("%H:00")
+        buckets[key] = {"value": 0, "blocked": 0}
+
+    for t in threats:
+        ti = t.get("threatInfo", {})
+        created = ti.get("createdAt", "")
+        if not created:
+            continue
+        try:
+            dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            hour_key = dt.strftime("%H:00")
+            if hour_key in buckets:
+                buckets[hour_key]["value"] += 1
+                mitigation = str(ti.get("mitigationStatusDescription", "")).lower()
+                if "mitigated" in mitigation and "not" not in mitigation:
+                    buckets[hour_key]["blocked"] += 1
+        except Exception:
+            continue
+
+    return [
+        TimePoint(timestamp=ts, value=d["value"], blocked=d["blocked"])
+        for ts, d in buckets.items()
+    ]
+
 
 
 # ════════════════════════════════════════════════════════════════
-#  Entry point
+#  Multi-client AV helpers
 # ════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "app:app",
-        host=settings.HOST,
-        port=settings.PORT,
-        reload=True,
-        log_level="info",
-    )
+import re as _re
+
+_SENSOR_STRIP_SUFFIXES = [
+    " - usm sensor", " - usm", " - alienvault", " - sensor",
+    " usm sensor", " usm", " sensor", " alienvault",
+    "_sensor", "_usm", "-sensor", "-usm",
+    " nfr", "-nfr", "_nfr",
+    " primary", " secondary", " backup", " main",
+    " hq", " head office", " headquarters",
+]
+
+def _sensor_to_client_name(sensor_name: str) -> str:
+    """
+    Derive a clean client name from an AV sensor name.
+    E.g. "Acme Corp - USM Sensor 1"  →  "Acme Corp"
+         "cybervergent-nfr-sensor"    →  "Cybervergent"
+    """
+    name = sensor_name.strip()
+    lower = name.lower()
+    for suffix in sorted(_SENSOR_STRIP_SUFFIXES, key=len, reverse=True):
+        if lower.endswith(suffix):
+            name  = name[: len(name) - len(suffix)].strip(" -_")
+            lower = name.lower()
+            break
+    # Remove trailing numbers / separators
+    name = _re.sub(r"[\s_\-]+\d+$", "", name).strip()
+    # Title-case if all-caps or all-lower
+    if name and (name == name.upper() or name == name.lower()):
+        name = _re.sub(r"[-_]", " ", name).title()
+    return name or sensor_name
+
+
+_NORMALIZE_STOP = {
+    "ltd", "limited", "inc", "plc", "ngo", "llc", "co", "corp",
+    "nfr", "sensor", "usm", "alienvault", "sentinelone",
+    "hq", "head", "office", "site", "primary", "secondary",
+    "the", "and", "of",
+}
+
+def _normalize_name(name: str) -> str:
+    """
+    Normalize a client name for fuzzy matching.
+    Lowercase, remove special chars, drop stopwords.
+    """
+    n = name.lower()
+    n = _re.sub(r"[^a-z0-9\s]", " ", n)
+    tokens = [t for t in n.split() if t and t not in _NORMALIZE_STOP and len(t) > 1]
+    return " ".join(tokens)
+
+
+# Explicit mapping for AlienVault names -> SentinelOne names
+# Use lowercase for both sides of the mapping
+_AV_TO_S1_MAP = {
+    "appzonegroup (qore)": "qore inc technologies",
+    "appzonegroup": "qore inc technologies",
+    "appzone": "qore inc technologies",
+    "qore": "qore inc technologies",
+    "zonenetwork": "zone payment network limited",
+    "etranzact2": "etranzact",
+    "etranzact": "etranzact",
+    "cybervergent": "cybervergent",
+    "esentry-nfr": "cybervergent",
+}
+
+def _find_best_match(norm_target: str, candidates: list, raw_av_name: str = "") -> Optional[str]:
+    """
+    Fuzzy-match norm_target against a list of normalized candidate keys.
+    Priority: Explicit Map -> exact → substring → Jaccard word-overlap (≥ 30 % union).
+    Returns the best matching key or None.
+    """
+    if not candidates:
+        return None
+
+    # 1. Check explicit mapping first
+    raw_lower = raw_av_name.lower().strip()
+    if raw_lower in _AV_TO_S1_MAP:
+        mapped_s1 = _AV_TO_S1_MAP[raw_lower]
+        # Find the normalized candidate that matches our mapped S1 name
+        for key in candidates:
+            if mapped_s1 in key or key in mapped_s1:
+                return key
+
+    if not norm_target:
+        return None
+
+    target_words = set(norm_target.split())
+    best_key, best_score = None, 0.0
+
+    for key in candidates:
+        # 2. Exact
+        if norm_target == key:
+            return key
+        # 3. Substring
+        if norm_target in key or key in norm_target:
+            score = len(norm_target) if norm_target in key else len(key)
+            if score > best_score:
+                best_score, best_key = float(score), key
+            continue
+        # 4. Word overlap (Jaccard)
+        key_words = set(key.split())
+        common = target_words & key_words
+        if not common:
+            continue
+        union  = target_words | key_words
+        score  = len(common) / len(union) * 100
+        shorter = min(len(target_words), len(key_words))
+        if shorter and len(common) / shorter >= 0.5:
+            score += 20
+        if score >= 30 and score > best_score:
+            best_score, best_key = score, key
+
+    return best_key
+
+
+def _fallback_av_client_name() -> str:
+    """Derive a human-readable fallback name from AV_SUBDOMAIN."""
+    subdomain = settings.AV_SUBDOMAIN.split(".")[0]   # e.g. 'cybervergent-nfr'
+    parts = [
+        p for p in subdomain.split("-")
+        if p.lower() not in ("nfr", "sensor", "usm", "av", "siem")
+    ]
+    return " ".join(p.title() for p in parts) or "AlienVault"
+
+
+def _merge_av_data(client: ClientSummary, alarms: list, events: list) -> None:
+    """
+    Enrich an existing (S1) ClientSummary with AlienVault alarm/event data.
+    Appends 'AlienVault' to client.platforms and increments all KPIs.
+    """
+    if "AlienVault" not in client.platforms:
+        client.platforms.append("AlienVault")
+
+    sev_map = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for a in alarms:
+        lbl = str(a.get("priority_label", "")).lower()
+        if lbl in sev_map:
+            sev_map[lbl] += 1
+
+    blocked     = sev_map["critical"]
+    high_threats = sev_map["critical"] + sev_map["high"]
+
+    client.total_alerts     += len(alarms)
+    client.total_threats    += high_threats
+    client.events_processed += len(events)
+    client.blocked_attempts += blocked
+
+    for a in alarms[:15]:
+        sev = str(a.get("priority_label", "medium")).lower()
+        if sev not in ("critical", "high", "medium", "low"):
+            sev = "medium"
+        client.recent_alerts.append(AlertItem(
+            id=f"AV-{str(a.get('uuid', ''))[:6]}",
+            alert_type=a.get("rule_method", "Alarm"),
+            source=a.get("source_name", a.get("sensor", "AlienVault")),
+            severity=sev,
+            time=_format_timestamp_ms(a.get("timestamp_received")),
+            status="active" if a.get("status") == "open" else "investigating",
+            platform="AlienVault",
+        ))
+
+    client.platform_data.append(PlatformStatus(
+        platform="AlienVault",
+        is_active=True,
+        total_endpoints=0,
+        total_threats=high_threats,
+        total_alerts=len(alarms),
+        events_processed=len(events),
+        blocked_attempts=blocked,
+    ))
+
+
+# Singleton
+aggregator = DashboardAggregator()
