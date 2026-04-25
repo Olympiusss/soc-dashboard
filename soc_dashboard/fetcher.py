@@ -229,22 +229,30 @@ class AVFetcher:
 
     def _resolve_deployment_url(self, dep: dict) -> Optional[str]:
         """Extract a usable base URL from a deployment object."""
+        # Try explicit URL fields first
         for key in ("url", "fqdn", "hostname", "base_url"):
             val = dep.get(key, "")
             if val:
                 return (f"https://{val}" if not val.startswith("http") else val).rstrip("/")
+        # Try self-link href
         self_link = dep.get("_links", {}).get("self", {}).get("href", "")
         if self_link and "alienvault.cloud" in self_link:
             from urllib.parse import urlparse as _up
             p = _up(self_link)
             if p.scheme and p.netloc:
                 return f"{p.scheme}://{p.netloc}"
+        # Try id field (sometimes contains full URL)
         dep_id = dep.get("id", "")
         if dep_id and "://" in dep_id:
             return f"https://{dep_id.split('://')[1].split('/')[0]}"
+        # Try name field — with or without .alienvault.cloud suffix
         name = dep.get("name", "")
-        if name and ".alienvault.cloud" in name:
-            return (f"https://{name}" if not name.startswith("http") else name).rstrip("/")
+        if name:
+            if "alienvault.cloud" in name:
+                return (f"https://{name}" if not name.startswith("http") else name).rstrip("/")
+            # Construct from bare name (e.g. 'capitalsage' → 'https://capitalsage.alienvault.cloud')
+            if name and not name.startswith("http") and " " not in name:
+                return f"https://{name}.alienvault.cloud"
         return None
 
     async def _get_deployment_token(self, dep_url: str) -> Optional[str]:
@@ -283,7 +291,7 @@ class AVFetcher:
             return []
         client = await self._get_client()
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        for path in ("/api/1.1/deployments", "/api/2.0/deployments"):
+        for path in ("/api/1.1/deployments", "/api/2.0/deployments", "/api/1.0/deployments"):
             try:
                 resp = await client.get(self.base_url.rstrip("/") + path, headers=headers, timeout=30)
                 logger.info(f"AV deployments {path} → HTTP {resp.status_code}")
@@ -294,12 +302,17 @@ class AVFetcher:
                         or data.get("deployments")
                         or (data if isinstance(data, list) else [])
                     )
+                    # Log a sample deployment so we can see its fields
+                    if deps:
+                        logger.info(f"AV: Sample deployment keys: {list(deps[0].keys())}")
+                        logger.info(f"AV: Sample deployment: {deps[0]}")
                     for d in deps:
                         d["_resolved_url"] = self._resolve_deployment_url(d)
                     valid = [d for d in deps if d.get("_resolved_url")]
-                    logger.info(f"AV: Found {len(valid)} deployments with usable URLs")
-                    self._deployments = valid
-                    return valid
+                    logger.info(f"AV: Found {len(deps)} deployments, {len(valid)} with usable URLs")
+                    if valid:
+                        self._deployments = valid
+                        return valid
             except Exception as e:
                 logger.warning(f"AV deployments {path} → {e}")
         logger.warning("AV: No deployments found — will use central URL as fallback")
