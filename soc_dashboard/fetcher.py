@@ -380,138 +380,178 @@ class DashboardAggregator:
         await self.av.close()
 
     async def fetch_all(self) -> DashboardState:
-        """Fetch from both platforms and build unified dashboard state."""
+        """
+        Unified multi-client fetch:
+        1. Discover ALL S1 sites + ALL AV sensors in parallel
+        2. Fetch per-site S1 data + all AV alarms/events in parallel
+        3. Group AV alarms/events by sensor UUID → client name
+        4. Fuzzy-merge AV clients into S1 clients (or create AV-only cards)
+        5. Build global KPIs
+        """
         async with self._lock:
             t0 = time.time()
             logger.info("Starting data fetch cycle...")
 
-            # ── Step 1a: S1 discovery FIRST (before AV hammers the event loop) ──
-            try:
-                s1_sites = await self.s1.discover_sites()
-            except Exception as e:
-                logger.error(f"S1 discovery error: {e}")
+            # ── Phase 1: Parallel discovery ──────────────────────────────
+            s1_sites, av_sensors = await asyncio.gather(
+                self.s1.discover_sites(),
+                self.av.fetch_sensors(),
+                return_exceptions=True,
+            )
+            if isinstance(s1_sites, Exception):
+                logger.error(f"S1 discovery error: {s1_sites}")
                 s1_sites = []
+            if isinstance(av_sensors, Exception):
+                logger.warning(f"AV sensor discovery error: {av_sensors}")
+                av_sensors = []
 
-            # ── Step 1b: Build S1 client list (concurrent per-site fetches) ──
-            clients: list[ClientSummary] = []
-            if s1_sites:
-                site_tasks = [
-                    self._build_s1_client(str(site.get("id", "")), site.get("name", "Unknown"))
-                    for site in s1_sites if site.get("id")
-                ]
-                results = await asyncio.gather(*site_tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, ClientSummary):
-                        clients.append(result)
-                    elif isinstance(result, Exception):
-                        logger.error(f"Client build error: {result}")
+            logger.info(f"Discovery: {len(s1_sites)} S1 sites, {len(av_sensors)} AV sensors")
 
-            # ── Step 1c: AV fetches AFTER S1 completes ──
-            try:
-                av_alarms, av_events = await asyncio.gather(
-                    self.av.fetch_alarms(days_back=30),
-                    self.av.fetch_events(days_back=1),
-                    return_exceptions=True,
-                )
-            except Exception as e:
-                logger.error(f"AV fetch error: {e}")
-                av_alarms, av_events = [], []
+            # ── Phase 2: Full parallel data fetch ────────────────────────
+            valid_s1_sites = [s for s in s1_sites if s.get("id")]
+            s1_build_tasks = [
+                self._build_s1_client(str(s["id"]), s.get("name", "Unknown"))
+                for s in valid_s1_sites
+            ]
+            all_results = await asyncio.gather(
+                *s1_build_tasks,
+                self.av.fetch_alarms(days_back=30),
+                self.av.fetch_events(days_back=1),
+                return_exceptions=True,
+            )
 
-            if isinstance(av_alarms, Exception):
-                logger.error(f"AV alarms error: {av_alarms}")
-                av_alarms = []
-            if isinstance(av_events, Exception):
-                logger.error(f"AV events error: {av_events}")
-                av_events = []
+            n_s1 = len(s1_build_tasks)
+            s1_results = all_results[:n_s1]
+            av_alarms_raw = all_results[n_s1]   if not isinstance(all_results[n_s1],   Exception) else []
+            av_events_raw = all_results[n_s1+1] if not isinstance(all_results[n_s1+1], Exception) else []
 
-            # ── Step 3: Enrich with AlienVault data ──
-            if av_alarms or av_events:
-                logger.info(f"AV: Processing {len(av_alarms)} alarms, {len(av_events)} events")
+            if isinstance(av_alarms_raw, Exception):
+                logger.error(f"AV alarms error: {av_alarms_raw}"); av_alarms_raw = []
+            if isinstance(av_events_raw, Exception):
+                logger.error(f"AV events error: {av_events_raw}"); av_events_raw = []
 
-                # All AV data belongs to ONE tenant — derive client name from subdomain
-                # e.g. "cybervergent-nfr.alienvault.cloud" → "Cybervergent"
-                subdomain = settings.AV_SUBDOMAIN.split(".")[0]  # "cybervergent-nfr"
-                av_client_name = subdomain.split("-")[0].title()  # "Cybervergent"
+            # ── Phase 3: Build S1 client index ───────────────────────────
+            # { normalized_name: ClientSummary }
+            clients: dict[str, ClientSummary] = {}
+            for result, site in zip(s1_results, valid_s1_sites):
+                if isinstance(result, ClientSummary):
+                    key = _normalize_name(result.name)
+                    clients[key] = result
+                else:
+                    logger.error(f"S1 build error for '{site.get('name')}': {result}")
 
-                av_summary = self._build_av_summary(av_alarms, av_events, av_client_name)
+            # ── Phase 4: Build AV sensor UUID & Name → client name map ───
+            sensor_map: dict[str, str] = {}
+            for sensor in av_sensors:
+                uid  = sensor.get("uuid") or sensor.get("id") or ""
+                raw  = sensor.get("name", "")
+                name = _sensor_to_client_name(raw)
+                if uid and name:
+                    sensor_map[uid] = name
+                if raw and name:
+                    sensor_map[raw] = name  # Also map the raw name
 
-                # Try to merge with existing S1 client by name match
-                merged = False
-                for c in clients:
-                    if (c.name.lower() == av_client_name.lower() or
-                        av_client_name.lower() in c.name.lower() or
-                        c.name.lower() in av_client_name.lower()):
-                        if "AlienVault" not in c.platforms:
-                            c.platforms.append("AlienVault")
-                        c.total_alerts += av_summary.total_alerts
-                        c.events_processed += av_summary.events_processed
-                        c.recent_alerts.extend(av_summary.recent_alerts)
-                        c.platform_data.extend(av_summary.platform_data)
-                        merged = True
-                        logger.info(f"AV: Merged into S1 client '{c.name}'")
-                        break
+            logger.info(f"AV: {len(av_sensors)} sensors mapped to client names")
 
-                if not merged:
-                    clients.append(av_summary)
-                    logger.info(f"AV: Added new client '{av_client_name}'")
+            # ── Phase 5: Group AV alarms + events by client ──────────────
+            client_alarms: dict[str, list] = {}  # client_name -> [alarms]
+            client_events: dict[str, list] = {}  # client_name -> [events]
+            fallback_name = _fallback_av_client_name()
 
-            # ── Step 4: Calculate global KPIs ──
-            global_endpoints = sum(c.total_endpoints for c in clients)
-            global_threats = sum(c.total_threats for c in clients)
-            global_alerts = sum(c.total_alerts for c in clients)
-            global_events = sum(c.events_processed for c in clients)
-            global_blocked = sum(c.blocked_attempts for c in clients)
-            global_dfir = sum(c.dfir_cases for c in clients)
+            for alarm in av_alarms_raw:
+                sensor_val = alarm.get("sensor", "")
+                # Try exact match in map, then try cleaning the sensor name, then fallback
+                cname = sensor_map.get(sensor_val) 
+                if not cname and sensor_val:
+                    cname = _sensor_to_client_name(sensor_val)
+                    if cname == sensor_val and not _find_best_match(_normalize_name(cname), list(clients.keys())):
+                        # If cleaning didn't help and no fuzzy match, use fallback
+                        cname = fallback_name
+                elif not cname:
+                    cname = fallback_name
+                
+                client_alarms.setdefault(cname, []).append(alarm)
 
-            # Global classifications
+            for event in av_events_raw:
+                sensor_val = event.get("sensor_uuid", "") or event.get("sensor", "")
+                cname = sensor_map.get(sensor_val)
+                if not cname and sensor_val:
+                    cname = _sensor_to_client_name(sensor_val)
+                    if cname == sensor_val and not _find_best_match(_normalize_name(cname), list(clients.keys())):
+                        cname = fallback_name
+                elif not cname:
+                    cname = fallback_name
+                    
+                client_events.setdefault(cname, []).append(event)
+
+            logger.info(
+                f"AV: grouped into {len(client_alarms)} clients: "
+                f"{list(client_alarms.keys())}"
+            )
+
+            # ── Phase 6: Merge AV into S1 clients (or create AV-only) ────
+            for av_name, alarms in client_alarms.items():
+                events   = client_events.get(av_name, [])
+                norm_av  = _normalize_name(av_name)
+                s1_match = _find_best_match(norm_av, list(clients.keys()))
+
+                if s1_match:
+                    _merge_av_data(clients[s1_match], alarms, events)
+                    logger.info(
+                        f"AV: '{av_name}' merged into S1 client '{clients[s1_match].name}'"
+                    )
+                else:
+                    av_only = self._build_av_summary(alarms, events, av_name)
+                    clients[norm_av] = av_only
+                    logger.info(f"AV: '{av_name}' added as AV-only client")
+
+            client_list = list(clients.values())
+
+            # ── Phase 7: Global KPIs ──────────────────────────────────────
+            global_endpoints = sum(c.total_endpoints for c in client_list)
+            global_threats   = sum(c.total_threats   for c in client_list)
+            global_alerts    = sum(c.total_alerts    for c in client_list)
+            global_events    = sum(c.events_processed for c in client_list)
+            global_blocked   = sum(c.blocked_attempts for c in client_list)
+            global_dfir      = sum(c.dfir_cases       for c in client_list)
+
             all_class_counts: Counter = Counter()
-            for c in clients:
+            for c in client_list:
                 for tc in c.threat_classifications:
                     all_class_counts[tc.name] += tc.count
 
             classification_colors = {
-                "Malware": "#3B82F6",
-                "Ransomware": "#EF4444",
-                "Trojan": "#F97316",
-                "PUP": "#22C55E",
-                "Cryptominer": "#8B5CF6",
-                "Infostealer": "#EC4899",
-                "Packed": "#F59E0B",
-                "General": "#6B7280",
+                "Malware":    "#3B82F6", "Ransomware":  "#EF4444",
+                "Trojan":     "#F97316", "PUP":         "#22C55E",
+                "Cryptominer":"#8B5CF6", "Infostealer": "#EC4899",
+                "Packed":     "#F59E0B", "General":     "#6B7280",
+                "Malicious":  "#EF4444", "Suspicious":  "#F59E0B",
             }
-
             global_classifications = [
                 ThreatClassification(
-                    name=name,
-                    count=count,
+                    name=name, count=count,
                     color=classification_colors.get(name, "#6B7280"),
                 )
                 for name, count in all_class_counts.most_common(10)
             ]
 
-            # Global recent alerts (top 20)
             all_alerts: list[AlertItem] = []
-            for c in clients:
+            for c in client_list:
                 all_alerts.extend(c.recent_alerts)
             all_alerts = sorted(all_alerts, key=lambda a: a.time, reverse=True)[:20]
 
-            # Global timeline
-            global_timeline = self._build_global_timeline(clients)
+            global_timeline = self._build_global_timeline(client_list)
 
-            # Determine system status
             status = "operational"
             if not settings.s1_configured() and not settings.av_configured():
                 status = "unconfigured"
-            elif not s1_sites and not av_alarms:
+            elif not s1_sites and not av_alarms_raw:
                 status = "degraded"
-
-            # Unique sectors (site names = clients = sectors)
-            sectors = len(clients)
 
             state = DashboardState(
                 last_updated=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 refresh_interval=settings.REFRESH_INTERVAL,
-                total_clients=len(clients),
+                total_clients=len(client_list),
                 system_status=status,
                 global_endpoints=global_endpoints,
                 global_threats=global_threats,
@@ -519,8 +559,8 @@ class DashboardAggregator:
                 global_events=global_events,
                 global_blocked=global_blocked,
                 global_dfir_cases=global_dfir,
-                sectors_affected=sectors,
-                clients=clients,
+                sectors_affected=len(client_list),
+                clients=client_list,
                 global_classifications=global_classifications,
                 global_alerts_list=all_alerts,
                 global_timeline=global_timeline,
@@ -528,7 +568,7 @@ class DashboardAggregator:
 
             self._cache = state
             elapsed = time.time() - t0
-            logger.info(f"Fetch cycle complete: {len(clients)} clients, {elapsed:.2f}s")
+            logger.info(f"Fetch cycle complete: {len(client_list)} clients, {elapsed:.2f}s")
             return state
 
     async def _build_s1_client(self, site_id: str, site_name: str) -> ClientSummary:
@@ -837,6 +877,156 @@ def _build_hourly_timeline(threats: list[dict]) -> list[TimePoint]:
         TimePoint(timestamp=ts, value=d["value"], blocked=d["blocked"])
         for ts, d in buckets.items()
     ]
+
+
+
+# ════════════════════════════════════════════════════════════════
+#  Multi-client AV helpers
+# ════════════════════════════════════════════════════════════════
+
+import re as _re
+
+_SENSOR_STRIP_SUFFIXES = [
+    " - usm sensor", " - usm", " - alienvault", " - sensor",
+    " usm sensor", " usm", " sensor", " alienvault",
+    "_sensor", "_usm", "-sensor", "-usm",
+    " nfr", "-nfr", "_nfr",
+    " primary", " secondary", " backup", " main",
+    " hq", " head office", " headquarters",
+]
+
+def _sensor_to_client_name(sensor_name: str) -> str:
+    """
+    Derive a clean client name from an AV sensor name.
+    E.g. "Acme Corp - USM Sensor 1"  →  "Acme Corp"
+         "cybervergent-nfr-sensor"    →  "Cybervergent"
+    """
+    name = sensor_name.strip()
+    lower = name.lower()
+    for suffix in sorted(_SENSOR_STRIP_SUFFIXES, key=len, reverse=True):
+        if lower.endswith(suffix):
+            name  = name[: len(name) - len(suffix)].strip(" -_")
+            lower = name.lower()
+            break
+    # Remove trailing numbers / separators
+    name = _re.sub(r"[\s_\-]+\d+$", "", name).strip()
+    # Title-case if all-caps or all-lower
+    if name and (name == name.upper() or name == name.lower()):
+        name = _re.sub(r"[-_]", " ", name).title()
+    return name or sensor_name
+
+
+_NORMALIZE_STOP = {
+    "ltd", "limited", "inc", "plc", "ngo", "llc", "co", "corp",
+    "nfr", "sensor", "usm", "alienvault", "sentinelone",
+    "hq", "head", "office", "site", "primary", "secondary",
+    "the", "and", "of",
+}
+
+def _normalize_name(name: str) -> str:
+    """
+    Normalize a client name for fuzzy matching.
+    Lowercase, remove special chars, drop stopwords.
+    """
+    n = name.lower()
+    n = _re.sub(r"[^a-z0-9\s]", " ", n)
+    tokens = [t for t in n.split() if t and t not in _NORMALIZE_STOP and len(t) > 1]
+    return " ".join(tokens)
+
+
+def _find_best_match(norm_target: str, candidates: list) -> Optional[str]:
+    """
+    Fuzzy-match norm_target against a list of normalized candidate keys.
+    Priority: exact → substring → Jaccard word-overlap (≥ 30 % union).
+    Returns the best matching key or None.
+    """
+    if not norm_target or not candidates:
+        return None
+
+    target_words = set(norm_target.split())
+    best_key, best_score = None, 0.0
+
+    for key in candidates:
+        # Exact
+        if norm_target == key:
+            return key
+        # Substring
+        if norm_target in key or key in norm_target:
+            score = len(norm_target) if norm_target in key else len(key)
+            if score > best_score:
+                best_score, best_key = float(score), key
+            continue
+        # Word overlap (Jaccard)
+        key_words = set(key.split())
+        common = target_words & key_words
+        if not common:
+            continue
+        union  = target_words | key_words
+        score  = len(common) / len(union) * 100
+        shorter = min(len(target_words), len(key_words))
+        if shorter and len(common) / shorter >= 0.5:
+            score += 20
+        if score >= 30 and score > best_score:
+            best_score, best_key = score, key
+
+    return best_key
+
+
+def _fallback_av_client_name() -> str:
+    """Derive a human-readable fallback name from AV_SUBDOMAIN."""
+    subdomain = settings.AV_SUBDOMAIN.split(".")[0]   # e.g. 'cybervergent-nfr'
+    parts = [
+        p for p in subdomain.split("-")
+        if p.lower() not in ("nfr", "sensor", "usm", "av", "siem")
+    ]
+    return " ".join(p.title() for p in parts) or "AlienVault"
+
+
+def _merge_av_data(client: ClientSummary, alarms: list, events: list) -> None:
+    """
+    Enrich an existing (S1) ClientSummary with AlienVault alarm/event data.
+    Appends 'AlienVault' to client.platforms and increments all KPIs.
+    """
+    if "AlienVault" not in client.platforms:
+        client.platforms.append("AlienVault")
+
+    sev_map = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for a in alarms:
+        lbl = str(a.get("priority_label", "")).lower()
+        if lbl in sev_map:
+            sev_map[lbl] += 1
+
+    blocked     = sev_map["critical"]
+    high_threats = sev_map["critical"] + sev_map["high"]
+
+    client.total_alerts     += len(alarms)
+    client.total_threats    += high_threats
+    client.events_processed += len(events)
+    client.blocked_attempts += blocked
+
+    for a in alarms[:15]:
+        sev = str(a.get("priority_label", "medium")).lower()
+        if sev not in ("critical", "high", "medium", "low"):
+            sev = "medium"
+        client.recent_alerts.append(AlertItem(
+            id=f"AV-{str(a.get('uuid', ''))[:6]}",
+            alert_type=a.get("rule_method", "Alarm"),
+            source=a.get("source_name", a.get("sensor", "AlienVault")),
+            severity=sev,
+            time=_format_timestamp_ms(a.get("timestamp_received")),
+            status="active" if a.get("status") == "open" else "investigating",
+            platform="AlienVault",
+        ))
+
+    client.platform_data.append(PlatformStatus(
+        platform="AlienVault",
+        is_active=True,
+        total_endpoints=0,
+        total_threats=high_threats,
+        total_alerts=len(alarms),
+        events_processed=len(events),
+        blocked_attempts=blocked,
+    ))
 
 
 # Singleton
