@@ -1,7 +1,7 @@
 /**
  * Sentrium Integrated SOC Dashboard — Per-Client Dashboard Logic
- * Handles WebSocket connection, filters data for CLIENT_NAME,
- * updates KPIs, charts, and alerts table in real time.
+ * Handles REST pre-load, WebSocket live updates, S1 threats table,
+ * and AlienVault alarms table — split by platform.
  */
 
 'use strict';
@@ -17,12 +17,35 @@ let updateTimerID = null;
 
 // DOM references
 const alertsTbody      = document.getElementById('alerts-tbody');
+const avAlarmsTbody    = document.getElementById('av-alarms-tbody');
 const lastUpdatedEl    = document.getElementById('last-updated');
 const systemStatusEl   = document.getElementById('system-status');
 const notifCountEl     = document.getElementById('notif-count');
 const activeCountEl    = document.getElementById('active-count');
+const avAlarmCountEl   = document.getElementById('av-alarm-count');
 const liveIndicator    = document.getElementById('live-indicator');
 const reconnectOverlay = document.getElementById('reconnect-overlay');
+const avSection        = document.getElementById('av-section');
+const platformPillsEl  = document.getElementById('platform-pills');
+const platformStatsEl  = document.getElementById('platform-stats');
+
+
+// ═══════════════════════════════════════════════════════════
+//  REST Pre-load (fast initial render before WS connects)
+// ═══════════════════════════════════════════════════════════
+
+async function preloadClientData() {
+    try {
+        const resp = await fetch(`/api/client/${encodeURIComponent(CLIENT_NAME)}/data`);
+        if (resp.ok) {
+            const client = await resp.json();
+            displayClientData(client);
+            console.log('[REST] Pre-loaded client data:', CLIENT_NAME);
+        }
+    } catch (e) {
+        console.warn('[REST] Pre-load failed (will rely on WS):', e);
+    }
+}
 
 
 // ═══════════════════════════════════════════════════════════
@@ -75,11 +98,8 @@ function connectWebSocket() {
 
 function handleDashboardUpdate(state) {
     lastUpdateTime = new Date();
-
-    // Update system status
     updateSystemStatus(state.system_status);
 
-    // Find this client in the state
     const clients = state.clients || [];
     const client = clients.find(
         c => c.name.toLowerCase() === CLIENT_NAME.toLowerCase()
@@ -88,7 +108,6 @@ function handleDashboardUpdate(state) {
     if (client) {
         displayClientData(client);
     } else {
-        // Client not found — show zeros
         console.warn(`Client "${CLIENT_NAME}" not found in ${clients.length} clients`);
     }
 
@@ -96,30 +115,82 @@ function handleDashboardUpdate(state) {
 }
 
 function displayClientData(client) {
-    // KPI Cards
+    // ── KPI Cards ──
     animateKPI('kpi-blocked',  client.blocked_attempts || 0);
     animateKPI('kpi-alerts',   client.total_alerts || 0);
     animateKPI('kpi-events',   client.events_processed || 0);
     animateKPI('kpi-dfir',     client.dfir_cases || 0);
     animateKPI('kpi-sectors',  (client.platforms || []).length);
 
-    // Charts
+    // ── Charts ──
     updateEventChart(client.event_timeline || []);
     updateEDRChart(client.threat_classifications || []);
 
-    // Alerts table
-    renderAlertsTable(client.recent_alerts || []);
+    // ── Platform Banner ──
+    renderPlatformBanner(client);
 
-    // Notification count — Unresolved = active
-    const activeAlerts = (client.recent_alerts || []).filter(
+    // ── Split alerts by platform ──
+    const allAlerts = client.recent_alerts || [];
+    const s1Alerts  = allAlerts.filter(a => a.platform === 'SentinelOne');
+    const avAlerts  = allAlerts.filter(a => a.platform === 'AlienVault');
+
+    // ── S1 Threats Table ──
+    renderAlertsTable(s1Alerts);
+    const activeAlerts = s1Alerts.filter(
         a => a.status === 'Unresolved' || a.status === 'In Progress'
     ).length;
     if (notifCountEl) {
         notifCountEl.textContent = activeAlerts;
         notifCountEl.dataset.count = activeAlerts;
     }
-    if (activeCountEl) {
-        activeCountEl.textContent = `${activeAlerts} Active`;
+    if (activeCountEl) activeCountEl.textContent = `${activeAlerts} Active`;
+
+    // ── AV Alarms Table ──
+    const hasAV = (client.platforms || []).includes('AlienVault');
+    if (hasAV || avAlerts.length > 0) {
+        if (avSection) avSection.classList.add('visible');
+        renderAVAlarmsTable(avAlerts, client.total_alerts || 0, s1Alerts.length);
+    } else {
+        if (avSection) avSection.classList.remove('visible');
+    }
+
+    lastUpdateTime = lastUpdateTime || new Date();
+    startUpdateTimer();
+}
+
+
+// ═══════════════════════════════════════════════════════════
+//  Platform Banner
+// ═══════════════════════════════════════════════════════════
+
+function renderPlatformBanner(client) {
+    const platforms = client.platforms || [];
+    if (!platformPillsEl) return;
+
+    const pills = platforms.map(p => {
+        if (p === 'SentinelOne') {
+            return `<span class="plat-pill plat-pill-s1"><span class="plat-pill-dot"></span>SentinelOne</span>`;
+        }
+        if (p === 'AlienVault') {
+            return `<span class="plat-pill plat-pill-av"><span class="plat-pill-dot"></span>AlienVault</span>`;
+        }
+        return `<span class="plat-pill">${escapeHtml(p)}</span>`;
+    }).join(' ');
+
+    platformPillsEl.innerHTML = pills || '—';
+
+    if (platformStatsEl) {
+        const allAlerts = client.recent_alerts || [];
+        const s1Count   = allAlerts.filter(a => a.platform === 'SentinelOne').length;
+        const avCount   = allAlerts.filter(a => a.platform === 'AlienVault').length;
+        let stats = '';
+        if (s1Count > 0 || platforms.includes('SentinelOne')) {
+            stats += `<span class="platform-stat">S1 threats: <strong>${formatNumber(s1Count)}</strong></span>`;
+        }
+        if (avCount > 0 || platforms.includes('AlienVault')) {
+            stats += `<span class="platform-stat">AV alarms: <strong>${formatNumber(client.total_alerts - s1Count || avCount)}</strong></span>`;
+        }
+        platformStatsEl.innerHTML = stats;
     }
 }
 
@@ -148,21 +219,17 @@ function renderAlertsTable(alerts) {
     if (!alertsTbody) return;
 
     if (!alerts.length) {
-        alertsTbody.innerHTML = '<tr class="empty-row"><td colspan="7" style="text-align:center;padding:40px;">No incidents in the last 24 hours</td></tr>';
+        alertsTbody.innerHTML = '<tr class="empty-row"><td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted);">No SentinelOne threats in the monitored window</td></tr>';
         return;
     }
 
     const rows = alerts.map(a => {
-        const platformChip = a.platform === 'SentinelOne'
-            ? `<span class="platform-chip platform-s1">S1</span>`
-            : `<span class="platform-chip platform-av">AV</span>`;
+        const platformChip = `<span class="platform-chip platform-s1">S1</span>`;
 
-        // AI Confidence badge
         const conf = (a.confidence || '').toLowerCase();
         const confClass = conf === 'malicious' ? 'conf-malicious' : conf === 'suspicious' ? 'conf-suspicious' : 'conf-unknown';
         const confBadge = `<span class="conf-badge ${confClass}">${escapeHtml(a.confidence || 'Unknown')}</span>`;
 
-        // Analyst Verdict
         const verdict = a.analyst_verdict || '';
         const verdictClass = verdict === 'True Positive' ? 'verdict-tp'
             : verdict === 'False Positive' ? 'verdict-fp'
@@ -172,7 +239,6 @@ function renderAlertsTable(alerts) {
             ? `<span class="verdict-badge ${verdictClass}">${escapeHtml(verdict)}</span>`
             : `<span class="verdict-badge verdict-other">Pending</span>`;
 
-        // Incident Status badge
         const status = a.status || '';
         const statusClass = status === 'Resolved' ? 'inc-resolved'
             : status === 'In Progress' ? 'inc-progress'
@@ -180,7 +246,6 @@ function renderAlertsTable(alerts) {
             : 'inc-other';
         const statusHtml = `<span class="inc-badge ${statusClass}">${escapeHtml(status || 'Unknown')}</span>`;
 
-        // Endpoint
         const endpoint = a.source
             ? `<span class="endpoint-name">${escapeHtml(a.source)}</span>`
             : `<span style="color:var(--text-muted)">—</span>`;
@@ -199,6 +264,54 @@ function renderAlertsTable(alerts) {
     }).join('');
 
     alertsTbody.innerHTML = rows;
+}
+
+function renderAVAlarmsTable(alarms, totalAVAlerts, s1Count) {
+    if (!avAlarmsTbody) return;
+
+    // Update count badge
+    const avTotal = totalAVAlerts - s1Count;
+    if (avAlarmCountEl) {
+        avAlarmCountEl.textContent = `${formatNumber(Math.max(avTotal, alarms.length))} alarms`;
+    }
+
+    if (!alarms.length) {
+        avAlarmsTbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted);">No AlienVault alarms in the monitored window</td></tr>';
+        return;
+    }
+
+    const rows = alarms.map(a => {
+        // Priority badge
+        const prio = (a.confidence || a.severity || 'medium').toLowerCase();
+        const prioClass = prio === 'critical' ? 'prio-critical'
+            : prio === 'high' ? 'prio-high'
+            : prio === 'low'  ? 'prio-low'
+            : 'prio-medium';
+        const prioBadge = `<span class="prio-badge ${prioClass}">${escapeHtml((a.confidence || prio).charAt(0).toUpperCase() + (a.confidence || prio).slice(1))}</span>`;
+
+        // Status badge
+        const status = (a.status || 'Open');
+        const statusClass = status === 'Open' ? 'av-status-open' : 'av-status-closed';
+        const statusBadge = `<span class="av-status-badge ${statusClass}">${escapeHtml(status)}</span>`;
+
+        // Source
+        const src = a.source
+            ? `<span class="endpoint-name">${escapeHtml(a.source)}</span>`
+            : `<span style="color:var(--text-muted)">—</span>`;
+
+        return `
+            <tr>
+                <td><strong class="threat-id" style="color:#F97316;">${escapeHtml(a.id)}</strong></td>
+                <td style="max-width:280px;">${escapeHtml(a.alert_type || '—')}</td>
+                <td>${prioBadge}</td>
+                <td>${statusBadge}</td>
+                <td>${src}</td>
+                <td class="reported-time">${escapeHtml(a.reported_at || a.time || '—')}</td>
+            </tr>
+        `;
+    }).join('');
+
+    avAlarmsTbody.innerHTML = rows;
 }
 
 
@@ -253,20 +366,6 @@ function startUpdateTimer() {
 
 
 // ═══════════════════════════════════════════════════════════
-//  Sidebar Navigation
-// ═══════════════════════════════════════════════════════════
-
-document.querySelectorAll('.nav-item').forEach(item => {
-    item.addEventListener('click', (e) => {
-        if (item.getAttribute('href') === '/') return; // Allow back navigation
-        e.preventDefault();
-        document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-        item.classList.add('active');
-    });
-});
-
-
-// ═══════════════════════════════════════════════════════════
 //  Utilities
 // ═══════════════════════════════════════════════════════════
 
@@ -277,13 +376,45 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
+function formatNumber(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+    return String(n);
+}
+
+
+// ═══════════════════════════════════════════════════════════
+//  Sidebar Navigation
+// ═══════════════════════════════════════════════════════════
+
+document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+        if (item.getAttribute('href') === '/') return;
+        e.preventDefault();
+        document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+        item.classList.add('active');
+    });
+});
+
 
 // ═══════════════════════════════════════════════════════════
 //  Bootstrap
 // ═══════════════════════════════════════════════════════════
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    // Truncate long client name in sidebar nav
+    const navName = document.getElementById('nav-client-name');
+    if (navName && CLIENT_NAME.length > 14) {
+        navName.textContent = CLIENT_NAME.substring(0, 14) + '…';
+        navName.title = CLIENT_NAME;
+    }
+
     initEventChart();
     initEDRChart();
+
+    // Pre-load via REST so the page renders immediately
+    await preloadClientData();
+
+    // Then connect WebSocket for live updates
     connectWebSocket();
 });
