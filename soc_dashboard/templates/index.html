@@ -1,369 +1,255 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ client_name }} — Sentrium SOC</title>
-    <meta name="description" content="Per-client SOC dashboard for {{ client_name }}">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=3">
-    <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.49.0/dist/apexcharts.min.js"></script>
-    <style>
-        /* ── Platform Banner ── */
-        .platform-banner {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 10px 20px;
-            background: var(--bg-card);
-            border: 1px solid var(--border-card);
-            border-radius: var(--radius-lg);
-            margin-bottom: 20px;
-            flex-wrap: wrap;
-        }
-        .platform-banner-label {
-            font-size: 0.78rem;
-            font-weight: 600;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            margin-right: 4px;
-        }
-        .plat-pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 0.78rem;
-            font-weight: 700;
-            letter-spacing: 0.03em;
-        }
-        .plat-pill-s1  { background: rgba(99,102,241,0.12); color: #6366F1; border: 1px solid rgba(99,102,241,0.3); }
-        .plat-pill-av  { background: rgba(249,115,22,0.12);  color: #F97316; border: 1px solid rgba(249,115,22,0.3); }
-        .plat-pill-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-        .platform-stats {
-            margin-left: auto;
-            display: flex;
-            gap: 20px;
-        }
-        .platform-stat { font-size: 0.8rem; color: var(--text-muted); }
-        .platform-stat strong { color: var(--text-primary); font-weight: 700; }
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>{{ client_name }} — Sentrium SOC</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/dashboard.css?v=4">
+<script src="https://cdn.jsdelivr.net/npm/apexcharts@3.49.0/dist/apexcharts.min.js"></script>
+<style>
+/* ── Tab Navigation ── */
+.client-tabs{display:flex;gap:4px;padding:0 0 20px;border-bottom:1px solid var(--border-card);margin-bottom:24px;}
+.tab-btn{padding:9px 20px;border-radius:8px;border:none;background:transparent;font-size:0.87rem;font-weight:600;color:var(--text-muted);cursor:pointer;transition:all .2s;font-family:inherit;}
+.tab-btn:hover{background:rgba(59,130,246,.07);color:var(--text-primary);}
+.tab-btn.active{background:var(--accent-blue);color:#fff;}
+.tab-pane{display:none;}.tab-pane.active{display:block;}
 
-        /* ── Section Divider ── */
-        .section-divider {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin: 28px 0 16px;
-        }
-        .section-divider h2 {
-            font-size: 1rem;
-            font-weight: 700;
-            color: var(--text-primary);
-            white-space: nowrap;
-        }
-        .section-divider-line {
-            flex: 1;
-            height: 1px;
-            background: var(--border-card);
-        }
-        .section-divider-badge {
-            padding: 3px 10px;
-            border-radius: 12px;
-            font-size: 0.72rem;
-            font-weight: 700;
-        }
-        .badge-s1 { background: rgba(99,102,241,0.1); color: #6366F1; }
-        .badge-av { background: rgba(249,115,22,0.1); color: #F97316; }
+/* ── Platform Banner ── */
+.platform-banner{display:flex;align-items:center;gap:10px;padding:10px 18px;background:var(--bg-card);border:1px solid var(--border-card);border-radius:var(--radius-lg);margin-bottom:20px;flex-wrap:wrap;}
+.platform-banner-label{font-size:.75rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;}
+.plat-pill{display:inline-flex;align-items:center;gap:5px;padding:3px 11px;border-radius:20px;font-size:.76rem;font-weight:700;}
+.plat-pill-s1{background:rgba(99,102,241,.12);color:#6366F1;border:1px solid rgba(99,102,241,.3);}
+.plat-pill-av{background:rgba(249,115,22,.12);color:#F97316;border:1px solid rgba(249,115,22,.3);}
+.plat-dot{width:6px;height:6px;border-radius:50%;background:currentColor;}
+.platform-stats{margin-left:auto;display:flex;gap:18px;}
+.platform-stat{font-size:.8rem;color:var(--text-muted);}
+.platform-stat strong{color:var(--text-primary);font-weight:700;}
 
-        /* ── AV Alarms Table ── */
-        #av-section { display: none; }
-        #av-section.visible { display: block; }
+/* ── Section heading ── */
+.sec-heading{display:flex;align-items:center;gap:10px;margin:22px 0 12px;}
+.sec-heading h2{font-size:.95rem;font-weight:700;color:var(--text-primary);white-space:nowrap;}
+.sec-line{flex:1;height:1px;background:var(--border-card);}
+.badge-s1{padding:2px 9px;border-radius:10px;font-size:.7rem;font-weight:700;background:rgba(99,102,241,.1);color:#6366F1;}
+.badge-av{padding:2px 9px;border-radius:10px;font-size:.7rem;font-weight:700;background:rgba(249,115,22,.1);color:#F97316;}
+.sec-count{font-size:.78rem;color:var(--text-muted);font-weight:600;}
 
-        .av-table-wrapper { overflow-x: auto; }
-        .av-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.85rem;
-        }
-        .av-table thead tr { border-bottom: 1px solid var(--border-card); }
-        .av-table th {
-            padding: 10px 14px;
-            text-align: left;
-            font-size: 0.72rem;
-            font-weight: 700;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            white-space: nowrap;
-        }
-        .av-table td {
-            padding: 12px 14px;
-            vertical-align: middle;
-            border-bottom: 1px solid rgba(0,0,0,0.04);
-            color: var(--text-primary);
-        }
-        .av-table tbody tr:hover { background: rgba(249,115,22,0.03); }
-        .av-table tbody tr:last-child td { border-bottom: none; }
+/* ── Breakdown grid (2-col) ── */
+.breakdown-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px;}
+@media(max-width:900px){.breakdown-grid{grid-template-columns:1fr;}}
+.bcard{background:var(--bg-card);border:1px solid var(--border-card);border-radius:var(--radius-lg);padding:18px;box-shadow:var(--shadow-sm);}
+.bcard-title{font-size:.82rem;font-weight:700;color:var(--text-primary);margin-bottom:12px;text-transform:uppercase;letter-spacing:.04em;}
 
-        /* Priority badges */
-        .prio-high     { background: rgba(239,68,68,0.1);  color: #EF4444; }
-        .prio-medium   { background: rgba(245,158,11,0.1); color: #F59E0B; }
-        .prio-low      { background: rgba(34,197,94,0.1);  color: #22C55E; }
-        .prio-critical { background: rgba(239,68,68,0.18); color: #DC2626; }
-        .prio-badge {
-            padding: 2px 8px;
-            border-radius: 8px;
-            font-size: 0.72rem;
-            font-weight: 700;
-        }
-        /* Status badges */
-        .av-status-open   { background: rgba(239,68,68,0.1);  color: #EF4444; }
-        .av-status-closed { background: rgba(107,114,128,0.1); color: #6B7280; }
-        .av-status-badge {
-            padding: 2px 8px;
-            border-radius: 8px;
-            font-size: 0.72rem;
-            font-weight: 600;
-        }
-    </style>
+/* ── Priority table ── */
+.prio-table{width:100%;border-collapse:collapse;font-size:.82rem;}
+.prio-table th{text-align:left;padding:6px 8px;font-size:.7rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;border-bottom:1px solid var(--border-card);}
+.prio-table td{padding:7px 8px;border-bottom:1px solid rgba(0,0,0,.04);}
+.prio-table tr:last-child td{border-bottom:none;}
+.prio-badge{display:inline-block;padding:2px 9px;border-radius:9px;font-size:.7rem;font-weight:700;}
+.prio-critical{background:rgba(220,38,38,.12);color:#DC2626;}
+.prio-high{background:rgba(239,68,68,.1);color:#EF4444;}
+.prio-medium{background:rgba(245,158,11,.1);color:#F59E0B;}
+.prio-low{background:rgba(34,197,94,.1);color:#22C55E;}
+.status-sub{display:flex;gap:8px;flex-wrap:wrap;margin-top:3px;}
+.status-chip{font-size:.68rem;padding:1px 7px;border-radius:6px;font-weight:600;}
+.chip-open{background:rgba(239,68,68,.1);color:#EF4444;}
+.chip-closed{background:rgba(107,114,128,.1);color:#6B7280;}
+.chip-review{background:rgba(245,158,11,.1);color:#F59E0B;}
+
+/* ── Method table ── */
+.method-table{width:100%;border-collapse:collapse;font-size:.82rem;}
+.method-table th{text-align:left;padding:6px 8px;font-size:.7rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;border-bottom:1px solid var(--border-card);}
+.method-table td{padding:6px 8px;border-bottom:1px solid rgba(0,0,0,.04);vertical-align:top;}
+.method-table tr:last-child td{border-bottom:none;}
+.intent-tag{font-size:.68rem;color:var(--text-muted);margin-top:2px;}
+.count-bar-wrap{display:flex;align-items:center;gap:6px;}
+.count-bar{height:6px;border-radius:3px;background:rgba(249,115,22,.5);min-width:4px;}
+
+/* ── Asset tables ── */
+.asset-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px;}
+@media(max-width:900px){.asset-grid{grid-template-columns:1fr;}}
+.asset-table{width:100%;border-collapse:collapse;font-size:.82rem;}
+.asset-table th{text-align:left;padding:6px 8px;font-size:.7rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;border-bottom:1px solid var(--border-card);}
+.asset-table td{padding:7px 8px;border-bottom:1px solid rgba(0,0,0,.04);}
+.asset-table tr:last-child td{border-bottom:none;}
+.asset-name{font-weight:600;color:var(--text-primary);font-size:.82rem;}
+.asset-tags{font-size:.68rem;color:var(--text-muted);margin-top:2px;}
+.count-pill{display:inline-block;padding:2px 8px;border-radius:8px;font-size:.75rem;font-weight:700;background:rgba(249,115,22,.1);color:#F97316;}
+
+/* ── Full alarm list ── */
+.alarm-card{background:var(--bg-card);border:1px solid var(--border-card);border-radius:var(--radius-lg);overflow:hidden;box-shadow:var(--shadow-sm);}
+.alarm-table-wrap{overflow-x:auto;}
+.alarm-full-table{width:100%;border-collapse:collapse;font-size:.82rem;}
+.alarm-full-table th{text-align:left;padding:10px 12px;font-size:.7rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--border-card);white-space:nowrap;background:var(--bg-sidebar);}
+.alarm-full-table td{padding:10px 12px;border-bottom:1px solid rgba(0,0,0,.04);vertical-align:top;}
+.alarm-full-table tbody tr:hover{background:rgba(249,115,22,.025);}
+.alarm-full-table tbody tr:last-child td{border-bottom:none;}
+.alarm-name{font-weight:600;color:var(--text-primary);}
+.alarm-meta{font-size:.72rem;color:var(--text-muted);margin-top:2px;}
+.av-st-open{background:rgba(239,68,68,.1);color:#EF4444;}
+.av-st-closed{background:rgba(107,114,128,.1);color:#6B7280;}
+.av-st-review{background:rgba(245,158,11,.1);color:#F59E0B;}
+.av-st-badge{padding:2px 8px;border-radius:7px;font-size:.7rem;font-weight:700;}
+
+/* ── EDR section ── */
+#tab-edr .alerts-section{margin-top:0;}
+</style>
 </head>
 <body>
-    <!-- ═══ LEFT SIDEBAR ═══ -->
-    <aside class="sidebar" id="sidebar">
-        <div class="sidebar-logo">
-            <div class="logo-icon-box">
-                <img src="/static/img/logo.png" alt="Sentrium Security">
-            </div>
-        </div>
-        <div class="sidebar-search">
-            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-            </svg>
-            <input type="text" placeholder="Search" id="sidebar-search-input">
-        </div>
-        <nav class="sidebar-nav">
-            <a href="/" class="nav-item" data-page="dashboard">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-                <span>All Clients</span>
-            </a>
-            <a href="#" class="nav-item active" data-page="client">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
-                <span id="nav-client-name">{{ client_name }}</span>
-            </a>
-            <a href="#" class="nav-item" data-page="alerts">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                <span>Alerts</span>
-            </a>
-            <a href="#" class="nav-item" data-page="reports">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-                <span>Reports</span>
-            </a>
-            <a href="#" class="nav-item" data-page="settings">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-                <span>Settings</span>
-            </a>
-        </nav>
-    </aside>
+<!-- ═══ SIDEBAR ═══ -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-logo"><div class="logo-icon-box"><img src="/static/img/logo.png" alt="Sentrium Security"></div></div>
+  <div class="sidebar-search">
+    <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+    <input type="text" placeholder="Search" id="sidebar-search-input">
+  </div>
+  <nav class="sidebar-nav">
+    <a href="/" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>All Clients</span></a>
+    <a href="#" class="nav-item active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg><span id="nav-client-name">{{ client_name }}</span></a>
+    <a href="#" class="nav-item" data-tab="alerts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg><span>Alerts</span></a>
+    <a href="#" class="nav-item" data-tab="edr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg><span>EDR</span></a>
+    <a href="#" class="nav-item" data-tab="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg><span>Settings</span></a>
+  </nav>
+</aside>
 
-    <!-- ═══ MAIN CONTENT ═══ -->
-    <main class="main-content">
-        <!-- ── Top Bar ── -->
-        <header class="topbar">
-            <div class="topbar-left" style="display:flex;align-items:center;gap:16px;">
-                <a href="/" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:1px solid rgba(0,0,0,0.08);background:#fff;text-decoration:none;color:#6B7280;transition:all 0.2s;" onmouseover="this.style.borderColor='#3B82F6';this.style.color='#3B82F6'" onmouseout="this.style.borderColor='rgba(0,0,0,0.08)';this.style.color='#6B7280'">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><polyline points="15 18 9 12 15 6"/></svg>
-                </a>
-                <div>
-                    <h1 class="page-title">{{ client_name }}</h1>
-                    <p class="page-subtitle">Security Operations Center — Client Dashboard</p>
-                </div>
-            </div>
-            <div class="topbar-right">
-                <div class="system-status" id="system-status">
-                    <span class="status-dot"></span>
-                    <span class="status-text">All System Operational</span>
-                </div>
-                <button class="topbar-icon-btn" id="notification-btn">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
-                    <span class="notif-badge" id="notif-count">0</span>
-                </button>
-                <a href="/logout" class="topbar-icon-btn user-btn" title="Sign Out">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                </a>
-            </div>
-        </header>
+<!-- ═══ MAIN ═══ -->
+<main class="main-content">
+  <!-- Topbar -->
+  <header class="topbar">
+    <div class="topbar-left" style="display:flex;align-items:center;gap:16px;">
+      <a href="/" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:1px solid rgba(0,0,0,.08);background:#fff;text-decoration:none;color:#6B7280;" onmouseover="this.style.color='#3B82F6'" onmouseout="this.style.color='#6B7280'">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><polyline points="15 18 9 12 15 6"/></svg>
+      </a>
+      <div><h1 class="page-title">{{ client_name }}</h1><p class="page-subtitle">Security Operations Center — Client Dashboard</p></div>
+    </div>
+    <div class="topbar-right">
+      <div class="system-status" id="system-status"><span class="status-dot"></span><span class="status-text">All System Operational</span></div>
+      <button class="topbar-icon-btn" id="notification-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg><span class="notif-badge" id="notif-count">0</span></button>
+      <a href="/logout" class="topbar-icon-btn user-btn" title="Sign Out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></a>
+    </div>
+  </header>
 
-        <!-- ── Platform Banner ── -->
-        <div class="platform-banner" id="platform-banner">
-            <span class="platform-banner-label">Monitored on:</span>
-            <span id="platform-pills">—</span>
-            <div class="platform-stats" id="platform-stats"></div>
-        </div>
+  <!-- Platform Banner -->
+  <div class="platform-banner">
+    <span class="platform-banner-label">Monitored on:</span>
+    <span id="platform-pills">—</span>
+    <div class="platform-stats" id="platform-stats"></div>
+  </div>
 
-        <!-- ── KPI Cards ── -->
-        <section class="kpi-row" id="kpi-row">
-            <div class="kpi-card" id="kpi-blocked">
-                <div class="kpi-content">
-                    <span class="kpi-value" data-target="0">0</span>
-                    <span class="kpi-label">BLOCKED ATTEMPTS</span>
-                </div>
-                <div class="kpi-icon kpi-icon-green">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
-                </div>
-            </div>
-            <div class="kpi-card" id="kpi-alerts">
-                <div class="kpi-content">
-                    <span class="kpi-value" data-target="0">0</span>
-                    <span class="kpi-label">ALERTS GENERATED</span>
-                </div>
-                <div class="kpi-icon kpi-icon-orange">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                </div>
-            </div>
-            <div class="kpi-card" id="kpi-events">
-                <div class="kpi-content">
-                    <span class="kpi-value" data-target="0">0</span>
-                    <span class="kpi-label">EVENTS PROCESSED</span>
-                </div>
-                <div class="kpi-icon kpi-icon-blue">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
-                </div>
-            </div>
-            <div class="kpi-card" id="kpi-dfir">
-                <div class="kpi-content">
-                    <span class="kpi-value" data-target="0">0</span>
-                    <span class="kpi-label">DFIR CASES</span>
-                </div>
-                <div class="kpi-icon kpi-icon-purple">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                </div>
-            </div>
-            <div class="kpi-card" id="kpi-sectors">
-                <div class="kpi-content">
-                    <span class="kpi-value" data-target="0">0</span>
-                    <span class="kpi-label">PLATFORMS</span>
-                </div>
-                <div class="kpi-icon kpi-icon-teal">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
-                </div>
-            </div>
-        </section>
+  <!-- Tab Buttons -->
+  <div class="client-tabs">
+    <button class="tab-btn active" data-target="tab-dashboard">Dashboard</button>
+    <button class="tab-btn" data-target="tab-alerts">Alerts <span id="tab-alerts-badge" style="font-size:.7rem;background:rgba(249,115,22,.15);color:#F97316;padding:1px 6px;border-radius:8px;margin-left:4px;display:none;"></span></button>
+    <button class="tab-btn" data-target="tab-edr">EDR</button>
+    <button class="tab-btn" data-target="tab-settings">Settings</button>
+  </div>
 
-        <!-- ── Charts Row ── -->
-        <section class="charts-row">
-            <div class="chart-card chart-card-wide">
-                <div class="chart-header">
-                    <h2>Event Activity</h2>
-                    <div class="chart-legend">
-                        <span class="legend-item"><span class="legend-dot" style="background:#3B82F6"></span> Total Events</span>
-                        <span class="legend-item"><span class="legend-dot" style="background:#F97316"></span> Blocked</span>
-                    </div>
-                </div>
-                <div id="event-chart" class="chart-body"></div>
-            </div>
-            <div class="chart-card chart-card-narrow">
-                <div class="chart-header">
-                    <h2>EDR Telemetry Detection</h2>
-                    <p class="chart-subtitle">Reputation and Behavioral Analysis</p>
-                </div>
-                <div id="edr-chart" class="chart-body"></div>
-            </div>
-        </section>
+  <!-- ══ TAB: DASHBOARD ══ -->
+  <div id="tab-dashboard" class="tab-pane active">
+    <section class="kpi-row" id="kpi-row">
+      <div class="kpi-card" id="kpi-blocked"><div class="kpi-content"><span class="kpi-value" data-target="0">0</span><span class="kpi-label">BLOCKED ATTEMPTS</span></div><div class="kpi-icon kpi-icon-green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg></div></div>
+      <div class="kpi-card" id="kpi-alerts"><div class="kpi-content"><span class="kpi-value" data-target="0">0</span><span class="kpi-label">TOTAL ALARMS (AV)</span></div><div class="kpi-icon kpi-icon-orange"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div></div>
+      <div class="kpi-card" id="kpi-threats"><div class="kpi-content"><span class="kpi-value" data-target="0">0</span><span class="kpi-label">THREATS (S1 24H)</span></div><div class="kpi-icon kpi-icon-purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg></div></div>
+      <div class="kpi-card" id="kpi-endpoints"><div class="kpi-content"><span class="kpi-value" data-target="0">0</span><span class="kpi-label">ENDPOINTS (S1)</span></div><div class="kpi-icon kpi-icon-blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div></div>
+      <div class="kpi-card" id="kpi-dfir"><div class="kpi-content"><span class="kpi-value" data-target="0">0</span><span class="kpi-label">DFIR CASES</span></div><div class="kpi-icon kpi-icon-teal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div></div>
+    </section>
+    <section class="charts-row">
+      <div class="chart-card chart-card-wide"><div class="chart-header"><h2>Event Activity</h2><div class="chart-legend"><span class="legend-item"><span class="legend-dot" style="background:#3B82F6"></span>Total Events</span><span class="legend-item"><span class="legend-dot" style="background:#F97316"></span>Blocked</span></div></div><div id="event-chart" class="chart-body"></div></div>
+      <div class="chart-card chart-card-narrow"><div class="chart-header"><h2>Detection Breakdown</h2><p class="chart-subtitle">Threat classification &amp; AV alarm intent</p></div><div id="edr-chart" class="chart-body"></div></div>
+    </section>
+    <!-- Quick summary rows -->
+    <div class="breakdown-grid" id="dash-summary-grid" style="margin-top:18px;">
+      <div class="bcard"><div class="bcard-title">AV Priority Summary</div><div id="dash-prio-summary"><p style="color:var(--text-muted);font-size:.82rem;">No AV data</p></div></div>
+      <div class="bcard"><div class="bcard-title">Top Alarm Methods</div><div id="dash-method-summary"><p style="color:var(--text-muted);font-size:.82rem;">No AV data</p></div></div>
+    </div>
+  </div>
 
-        <!-- ── SentinelOne Threats Section ── -->
-        <section class="alerts-section" id="s1-section">
-            <div class="section-divider">
-                <h2>SentinelOne Threats</h2>
-                <span class="section-divider-badge badge-s1">S1</span>
-                <div class="section-divider-line"></div>
-                <span class="active-badge" id="active-count">0 Active</span>
-            </div>
-            <div class="alerts-card">
-                <div class="alerts-table-wrapper">
-                    <table class="alerts-table" id="alerts-table">
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>THREAT DETAILS</th>
-                                <th>AI CONFIDENCE</th>
-                                <th>ANALYST VERDICT</th>
-                                <th>INCIDENT STATUS</th>
-                                <th>ENDPOINT</th>
-                                <th>REPORTED TIME</th>
-                            </tr>
-                        </thead>
-                        <tbody id="alerts-tbody">
-                            <tr class="empty-row">
-                                <td colspan="7">Waiting for data...</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </section>
+  <!-- ══ TAB: ALERTS (AlienVault) ══ -->
+  <div id="tab-alerts" class="tab-pane">
+    <div class="sec-heading"><h2>AlienVault Alarms</h2><span class="badge-av">AV</span><div class="sec-line"></div><span class="sec-count" id="av-total-count">0 alarms · 24hr window</span></div>
 
-        <!-- ── AlienVault Alarms Section ── -->
-        <section class="alerts-section" id="av-section">
-            <div class="section-divider">
-                <h2>AlienVault Alarms</h2>
-                <span class="section-divider-badge badge-av">AV</span>
-                <div class="section-divider-line"></div>
-                <span id="av-alarm-count" style="font-size:0.8rem;color:var(--text-muted);font-weight:600;">0 alarms</span>
-            </div>
-            <div class="alerts-card">
-                <div class="av-table-wrapper">
-                    <table class="av-table" id="av-alarms-table">
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>ALARM NAME / METHOD</th>
-                                <th>PRIORITY</th>
-                                <th>STATUS</th>
-                                <th>SOURCE</th>
-                                <th>TIME</th>
-                            </tr>
-                        </thead>
-                        <tbody id="av-alarms-tbody">
-                            <tr class="empty-row">
-                                <td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted);">No AlienVault alarms</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </section>
-
-        <!-- ── Live Indicator ── -->
-        <div class="live-indicator" id="live-indicator">
-            <span class="live-pulse"></span>
-            <span class="live-text">Last updated: <span id="last-updated">connecting...</span></span>
-        </div>
-    </main>
-
-    <!-- ═══ RIGHT ACCENT STRIP ═══ -->
-    <aside class="right-strip">
-        <div class="strip-text">
-            <span>Sentrium Security</span>
-            <span class="strip-year">SOC Dashboard</span>
-        </div>
-    </aside>
-
-    <!-- ═══ Reconnecting Overlay ═══ -->
-    <div class="reconnect-overlay" id="reconnect-overlay">
-        <div class="reconnect-box">
-            <div class="reconnect-spinner"></div>
-            <p>Reconnecting to server...</p>
-        </div>
+    <!-- Priority × Status + Method breakdown -->
+    <div class="breakdown-grid">
+      <div class="bcard">
+        <div class="bcard-title">Alarms by Priority &amp; Status</div>
+        <table class="prio-table" id="prio-table">
+          <thead><tr><th>Priority</th><th>Total</th><th>Status Breakdown</th></tr></thead>
+          <tbody id="prio-tbody"><tr><td colspan="3" style="color:var(--text-muted);padding:16px 8px;">Loading...</td></tr></tbody>
+        </table>
+      </div>
+      <div class="bcard">
+        <div class="bcard-title">Alarms by Strategy &amp; Method</div>
+        <table class="method-table" id="method-table">
+          <thead><tr><th>Method</th><th>Intent</th><th style="text-align:right;">Count</th></tr></thead>
+          <tbody id="method-tbody"><tr><td colspan="3" style="color:var(--text-muted);padding:16px 8px;">Loading...</td></tr></tbody>
+        </table>
+      </div>
     </div>
 
-    <script>
-        const WS_URL = "{{ ws_url }}";
-        const REFRESH_INTERVAL = {{ refresh_interval }};
-        const CLIENT_NAME = "{{ client_name }}";
-    </script>
-    <script src="/static/js/charts.js?v=3"></script>
-    <script src="/static/js/dashboard.js?v=3"></script>
+    <!-- Sources & Destinations -->
+    <div class="asset-grid">
+      <div class="bcard">
+        <div class="bcard-title">Top 5 Source Assets</div>
+        <table class="asset-table" id="src-table">
+          <thead><tr><th>Asset / IP</th><th>Alarms</th><th>Top Methods</th></tr></thead>
+          <tbody id="src-tbody"><tr><td colspan="3" style="color:var(--text-muted);padding:16px 8px;">Loading...</td></tr></tbody>
+        </table>
+      </div>
+      <div class="bcard">
+        <div class="bcard-title">Top 5 Destination Assets</div>
+        <table class="asset-table" id="dst-table">
+          <thead><tr><th>Asset / IP</th><th>Alarms</th><th>Top Methods</th></tr></thead>
+          <tbody id="dst-tbody"><tr><td colspan="3" style="color:var(--text-muted);padding:16px 8px;">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Full Alarm List -->
+    <div class="sec-heading"><h2>Alarm List</h2><div class="sec-line"></div><span class="sec-count">Showing latest 50 of <span id="av-list-total">—</span></span></div>
+    <div class="alarm-card">
+      <div class="alarm-table-wrap">
+        <table class="alarm-full-table">
+          <thead><tr><th>ALARM SUMMARY</th><th>PRIORITY</th><th>STATUS</th><th>SOURCE</th><th>DESTINATION</th><th>TIME</th></tr></thead>
+          <tbody id="alarm-list-tbody"><tr><td colspan="6" style="text-align:center;padding:32px;color:var(--text-muted);">Waiting for data...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ TAB: EDR (SentinelOne) ══ -->
+  <div id="tab-edr" class="tab-pane">
+    <div class="sec-heading"><h2>SentinelOne — EDR Threats</h2><span class="badge-s1">S1</span><div class="sec-line"></div><span class="sec-count" id="s1-threat-count">0 threats · 24hr window</span></div>
+    <div class="alerts-card">
+      <div class="alerts-table-wrapper">
+        <table class="alerts-table">
+          <thead><tr><th>ID</th><th>THREAT DETAILS</th><th>AI CONFIDENCE</th><th>ANALYST VERDICT</th><th>INCIDENT STATUS</th><th>ENDPOINT</th><th>REPORTED TIME</th></tr></thead>
+          <tbody id="alerts-tbody"><tr class="empty-row"><td colspan="7">Waiting for data...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ TAB: SETTINGS ══ -->
+  <div id="tab-settings" class="tab-pane">
+    <div class="bcard" style="margin-top:8px;">
+      <div class="bcard-title">Client Configuration</div>
+      <p style="color:var(--text-muted);font-size:.85rem;line-height:1.7;">Settings for <strong>{{ client_name }}</strong> will appear here. Platform integrations, alert thresholds, and notification preferences.</p>
+    </div>
+  </div>
+
+  <!-- Live indicator -->
+  <div class="live-indicator" id="live-indicator"><span class="live-pulse"></span><span class="live-text">Last updated: <span id="last-updated">connecting...</span></span></div>
+</main>
+
+<!-- Right strip -->
+<aside class="right-strip"><div class="strip-text"><span>Sentrium Security</span><span class="strip-year">SOC Dashboard</span></div></aside>
+<div class="reconnect-overlay" id="reconnect-overlay"><div class="reconnect-box"><div class="reconnect-spinner"></div><p>Reconnecting...</p></div></div>
+
+<script>
+const WS_URL = "{{ ws_url }}";
+const REFRESH_INTERVAL = {{ refresh_interval }};
+const CLIENT_NAME = "{{ client_name }}";
+</script>
+<script src="/static/js/charts.js?v=4"></script>
+<script src="/static/js/dashboard.js?v=4"></script>
 </body>
 </html>
