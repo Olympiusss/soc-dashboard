@@ -354,19 +354,28 @@ class AVFetcher:
 
 
     async def _fetch_alarms_one(self, dep_url: str, dep_name: str, central_token: str, days_back: int) -> list[dict]:
-        """Fetch alarms from one deployment. Memory-safe: max 5 pages, 200 per page."""
+        """Fetch alarms from one deployment with strict client-side time filtering."""
         if not dep_url:
             logger.warning(f"AV: {dep_name} has no URL — skipping")
             return []
         client = await self._get_client()
         token = (await self._get_deployment_token(dep_url)) or central_token
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        now = datetime.now(timezone.utc)
+        now      = datetime.now(timezone.utc)
         start_ms = int((now - timedelta(days=days_back)).timestamp() * 1000)
         end_ms   = int(now.timestamp() * 1000)
         url = dep_url.rstrip("/") + "/api/2.0/alarms"
-        params = {"timestamp_occured_gte": start_ms, "timestamp_occured_lte": end_ms,
-                  "sort": "timestamp_occured,desc", "size": 200, "page": 0}
+
+        # Send both possible field names — AV accepts whichever it knows
+        params = {
+            "timestamp_occured_gte":  start_ms,
+            "timestamp_occured_lte":  end_ms,
+            "timestamp_received_gte": start_ms,
+            "timestamp_received_lte": end_ms,
+            "sort": "timestamp_occured,desc",
+            "size": 200,
+            "page": 0,
+        }
         all_alarms: list[dict] = []
         try:
             resp = await client.get(url, headers=headers, params=params, timeout=30)
@@ -379,8 +388,9 @@ class AVFetcher:
             for a in batch:
                 a["_deployment_name"] = dep_name
             all_alarms.extend(batch)
-            # Cap at 5 pages (1,000 alarms max per deployment) to prevent OOM
-            max_pages = min(total_pages, 5)
+
+            # For 24hr window limit to 2 pages (400 alarms max); longer windows up to 5
+            max_pages = min(total_pages, 2 if days_back <= 1 else 5)
             if max_pages > 1:
                 async def _page(pg: int) -> list[dict]:
                     try:
@@ -403,8 +413,18 @@ class AVFetcher:
                         all_alarms.extend(r)
         except Exception as e:
             logger.error(f"AV alarm fetch {dep_name}: {e}")
-        logger.info(f"AV: {dep_name} → {len(all_alarms)} alarms")
-        return all_alarms
+
+        # ── Strict client-side time-window filter ────────────────────────────
+        # The AV API server-side filter is unreliable; enforce the window locally.
+        def _in_window(a: dict) -> bool:
+            ts = a.get("timestamp_occured") or a.get("timestamp_received") or 0
+            return start_ms <= int(ts) <= end_ms
+
+        filtered = [a for a in all_alarms if _in_window(a)]
+        logger.info(
+            f"AV: {dep_name} → {len(all_alarms)} raw, {len(filtered)} in {days_back}d window"
+        )
+        return filtered
 
     async def fetch_alarms_per_deployment(self, days_back: int = 7) -> dict[str, list]:
         """
