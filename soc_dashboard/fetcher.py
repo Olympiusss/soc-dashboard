@@ -442,11 +442,16 @@ class AVFetcher:
         for res in results:
             if isinstance(res, tuple):
                 name, alarms = res
-                if alarms:
-                    out[name] = alarms
+                out[name] = alarms  # Always include — even empty list keeps the card alive
             elif isinstance(res, Exception):
                 logger.error(f"AV deployment fetch error: {res}")
-        logger.info(f"AV: {len(out)} deployments with alarms: {list(out.keys())}")
+        # Ensure ALL known cached deployments appear even if their fetch failed this cycle
+        for dep in self._deployments:
+            dep_name = dep.get("name", "Unknown")
+            if dep_name not in out:
+                out[dep_name] = []  # 0 alarms this cycle but still show the card
+                logger.info(f"AV: {dep_name} — 0 alarms this cycle (cached deployment kept)")
+        logger.info(f"AV: {len(out)} deployments total (including 0-alarm): {list(out.keys())}")
         return out
 
     async def fetch_alarms(self, days_back: int = 30) -> list[dict]:
@@ -572,7 +577,13 @@ class DashboardAggregator:
                     logger.error(f"S1 build error for '{site.get('name')}': {result}")
 
             # ── Phase 4: Merge AV deployments into S1 clients (or create AV-only) ──
-            # av_per_dep_raw = {dep_name: [alarms], ...} — each key IS the client name
+            # Seed with ALL cached deployments first — so cards appear even on 0-alarm cycles
+            cached_deps = self.av._deployments or []
+            for dep in cached_deps:
+                dep_name = dep.get("name", "Unknown")
+                if dep_name not in av_per_dep_raw:
+                    av_per_dep_raw[dep_name] = []
+
             total_av_alarms = sum(len(v) for v in av_per_dep_raw.values())
             logger.info(f"AV: {len(av_per_dep_raw)} deployments, {total_av_alarms} total alarms")
             logger.info(f"AV: deployment names: {list(av_per_dep_raw.keys())}")
@@ -588,7 +599,7 @@ class DashboardAggregator:
                     clean_name = dep_name.replace("-", " ").title()
                     av_only = self._build_av_summary(alarms, [], clean_name)
                     clients[norm_dep] = av_only
-                    logger.info(f"AV: '{dep_name}' → standalone AV-only card")
+                    logger.info(f"AV: '{dep_name}' → standalone AV-only card ({len(alarms)} alarms)")
 
 
             client_list = list(clients.values())
