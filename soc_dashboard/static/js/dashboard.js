@@ -1,411 +1,333 @@
 /**
- * Sentrium SOC — Per-Client Dashboard JS
- * Tabs: Dashboard | Alerts (AV) | EDR (S1) | Settings
+ * Sentrium SOC — Per-Client Dashboard JS  v6
+ * Executive-grade: Overview | Alerts (AV) | EDR (S1) | Settings
  */
 'use strict';
 
-let ws = null, reconnectAttempts = 0, lastUpdateTime = null, updateTimerID = null;
+let ws = null, reconnectAttempts = 0, lastUpdateTime = null, _updateTimer = null;
 
-// ── DOM refs ──────────────────────────────────────────────
-const alertsTbody      = document.getElementById('alerts-tbody');
-const alarmListTbody   = document.getElementById('alarm-list-tbody');
-const prioTbody        = document.getElementById('prio-tbody');
-const methodTbody      = document.getElementById('method-tbody');
-const srcTbody         = document.getElementById('src-tbody');
-const dstTbody         = document.getElementById('dst-tbody');
-const lastUpdatedEl    = document.getElementById('last-updated');
-const systemStatusEl   = document.getElementById('system-status');
-const notifCountEl     = document.getElementById('notif-count');
-const liveIndicator    = document.getElementById('live-indicator');
-const reconnectOverlay = document.getElementById('reconnect-overlay');
-const platformPillsEl  = document.getElementById('platform-pills');
-const platformStatsEl  = document.getElementById('platform-stats');
+// ── DOM refs ─────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
 
-
-// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 //  Tab Switching
-// ═══════════════════════════════════════════════════════════
-function switchTab(targetId) {
+// ═══════════════════════════════════════════════════════════════════════════
+function switchTab(id) {
     document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    const pane = document.getElementById(targetId);
-    const btn  = document.querySelector(`.tab-btn[data-target="${targetId}"]`);
+    const pane = $(id), btn = document.querySelector(`.tab-btn[data-target="${id}"]`);
     if (pane) pane.classList.add('active');
     if (btn)  btn.classList.add('active');
 }
+document.querySelectorAll('.tab-btn[data-target]').forEach(b =>
+    b.addEventListener('click', () => switchTab(b.dataset.target))
+);
 
-document.querySelectorAll('.tab-btn[data-target]').forEach(btn => {
-    btn.addEventListener('click', () => switchTab(btn.dataset.target));
-});
-
-// Sidebar nav → tabs
-document.querySelectorAll('.nav-item[data-tab]').forEach(item => {
-    item.addEventListener('click', e => {
-        e.preventDefault();
-        const tabMap = { alerts: 'tab-alerts', edr: 'tab-edr', settings: 'tab-settings' };
-        const target = tabMap[item.dataset.tab];
-        if (target) switchTab(target);
-        document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-        item.classList.add('active');
-    });
-});
-
-
-// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 //  REST Pre-load
-// ═══════════════════════════════════════════════════════════
-async function preloadClientData() {
+// ═══════════════════════════════════════════════════════════════════════════
+async function preload() {
     try {
         const r = await fetch(`/api/client/${encodeURIComponent(CLIENT_NAME)}/data`);
-        if (r.ok) displayClientData(await r.json());
+        if (r.ok) renderClient(await r.json());
     } catch(e) { console.warn('[REST] pre-load failed:', e); }
 }
 
-
-// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 //  WebSocket
-// ═══════════════════════════════════════════════════════════
-function connectWebSocket() {
-    if (ws && ws.readyState === WebSocket.OPEN) return;
+// ═══════════════════════════════════════════════════════════════════════════
+function connectWS() {
     ws = new WebSocket(WS_URL);
     ws.onopen = () => {
         reconnectAttempts = 0;
-        if (reconnectOverlay) reconnectOverlay.classList.remove('visible');
-        liveIndicator.classList.remove('disconnected');
+        const o = $('reconnect-overlay'); if (o) o.classList.remove('visible');
+        const li = $('live-indicator');   if (li) li.classList.remove('disconnected');
     };
     ws.onmessage = e => {
         try {
             const d = JSON.parse(e.data);
-            if (d.type === 'client_detail') displayClientData(d.client);
-            else handleDashboardUpdate(d);
-        } catch(err) { console.error('[WS] parse error', err); }
+            const client = (d.clients||[]).find(c => c.name.toLowerCase() === CLIENT_NAME.toLowerCase());
+            if (client) { renderClient(client); lastUpdateTime = new Date(); startTimer(); }
+            updateStatus(d.system_status);
+        } catch(err) { console.error('[WS]', err); }
     };
     ws.onclose = () => {
-        liveIndicator.classList.add('disconnected');
+        const li = $('live-indicator'); if (li) li.classList.add('disconnected');
         reconnectAttempts++;
-        if (reconnectAttempts > 2 && reconnectOverlay) reconnectOverlay.classList.add('visible');
-        setTimeout(connectWebSocket, Math.min(reconnectAttempts * 2000, 15000));
+        if (reconnectAttempts > 2) { const o = $('reconnect-overlay'); if (o) o.classList.add('visible'); }
+        setTimeout(connectWS, Math.min(reconnectAttempts * 2000, 15000));
     };
     ws.onerror = () => ws.close();
 }
 
-
-// ═══════════════════════════════════════════════════════════
-//  Main Data Handler
-// ═══════════════════════════════════════════════════════════
-function handleDashboardUpdate(state) {
-    lastUpdateTime = new Date();
-    updateSystemStatus(state.system_status);
-    const client = (state.clients||[]).find(c => c.name.toLowerCase() === CLIENT_NAME.toLowerCase());
-    if (client) displayClientData(client);
-    startUpdateTimer();
-}
-
-function displayClientData(client) {
+// ═══════════════════════════════════════════════════════════════════════════
+//  Main render
+// ═══════════════════════════════════════════════════════════════════════════
+function renderClient(c) {
+    if (!c) return;
     lastUpdateTime = lastUpdateTime || new Date();
 
     // Platform banner
-    renderPlatformBanner(client);
+    const platforms = c.platforms || [];
+    const ppEl = $('platform-pills');
+    if (ppEl) ppEl.innerHTML = platforms.map(p =>
+        p === 'SentinelOne'
+            ? '<span class="plat-pill plat-pill-s1"><span class="plat-dot"></span>SentinelOne</span>'
+            : '<span class="plat-pill plat-pill-av"><span class="plat-dot"></span>AlienVault</span>'
+    ).join('') || '—';
 
-    // KPIs (Dashboard tab)
-    const avAlarms  = client.av_total_alarms || client.total_alerts || 0;
-    const s1Alerts  = (client.recent_alerts||[]).filter(a => a.platform === 'SentinelOne');
-    animateKPI('kpi-blocked',   client.blocked_attempts || 0);
-    animateKPI('kpi-alerts',    avAlarms);
-    animateKPI('kpi-threats',   client.total_threats || 0);
-    animateKPI('kpi-endpoints', client.total_endpoints || 0);
-    animateKPI('kpi-dfir',      client.dfir_cases || 0);
+    const psEl = $('platform-stats');
+    if (psEl) {
+        const avN = c.av_total_alarms || 0;
+        const s1N = (c.recent_alerts||[]).filter(a => a.platform === 'SentinelOne').length;
+        psEl.innerHTML =
+            (platforms.includes('SentinelOne') ? `<span class="plat-stat">S1 threats: <strong>${fmt(s1N)}</strong></span>` : '') +
+            (platforms.includes('AlienVault')  ? `<span class="plat-stat">AV alarms: <strong>${fmt(avN)}</strong></span>`  : '');
+    }
+
+    // KPIs
+    const avTotal = c.av_total_alarms || c.total_alerts || 0;
+    animKPI('kv-alarms',    avTotal);
+    animKPI('kv-threats',   c.total_threats || 0);
+    animKPI('kv-endpoints', c.total_endpoints || 0);
+    animKPI('kv-blocked',   c.blocked_attempts || 0);
+    animKPI('kv-dfir',      c.dfir_cases || 0);
+
+    // KPI bars (as % of reasonable max)
+    setBar('kb-alarms',    avTotal, 100);
+    setBar('kb-threats',   c.total_threats, 50);
+    setBar('kb-endpoints', c.total_endpoints, 500);
+    setBar('kb-blocked',   c.blocked_attempts, 20);
+    setBar('kb-dfir',      c.dfir_cases, 10);
 
     // Charts
-    updateEventChart(client.event_timeline || []);
-    updateEDRChart(client.threat_classifications || []);
+    updateEventChart(c.event_timeline || []);
+    updateEDRChart(c.threat_classifications || []);
 
-    // Dashboard quick summary
-    renderDashPrioSummary(client.av_priority_breakdown || []);
-    renderDashMethodSummary(client.av_method_summary || []);
+    // Overview quick panels
+    renderDashPrio(c.av_priority_breakdown || []);
+    renderDashMethods(c.av_method_summary || []);
 
     // Alerts tab badge
-    const badge = document.getElementById('tab-alerts-badge');
-    if (badge && avAlarms > 0) { badge.textContent = formatNumber(avAlarms); badge.style.display = 'inline'; }
+    const badge = $('tab-av-badge');
+    if (badge && avTotal > 0) { badge.textContent = fmt(avTotal); badge.style.display = 'inline'; }
 
-    // ── Alerts tab ──
-    renderAVTotal(client.av_total_alarms || 0);
-    renderPriorityTable(client.av_priority_breakdown || []);
-    renderMethodTable(client.av_method_summary || []);
-    renderAssetTable('src-tbody', client.av_top_sources || []);
-    renderAssetTable('dst-tbody', client.av_top_destinations || []);
-    renderAlarmList(client.recent_alerts || []);
+    // Alerts tab
+    const avLbl = $('av-total-lbl');
+    if (avLbl) avLbl.textContent = `${fmt(avTotal)} alarms · 24hr window`;
+    const listTotal = $('av-list-total');
+    if (listTotal) listTotal.textContent = fmt(avTotal);
 
-    // ── EDR tab ──
-    renderS1ThreatCount(s1Alerts.length);
-    renderAlertsTable(s1Alerts);
-    if (notifCountEl) notifCountEl.textContent = s1Alerts.filter(a => a.status === 'Unresolved' || a.status === 'In Progress').length;
+    renderPrioTable(c.av_priority_breakdown || []);
+    renderMethTable(c.av_method_summary || []);
+    renderAssetTable('src-tbody', c.av_top_sources || []);
+    renderAssetTable('dst-tbody', c.av_top_destinations || []);
+    renderAlarmList(c.recent_alerts || []);
 
-    startUpdateTimer();
+    // EDR tab
+    const s1Alerts = (c.recent_alerts||[]).filter(a => a.platform === 'SentinelOne');
+    const s1Lbl = $('s1-threat-lbl');
+    if (s1Lbl) s1Lbl.textContent = `${fmt(s1Alerts.length)} threats · 24hr window`;
+    renderS1Table(s1Alerts);
+
+    startTimer();
 }
 
-
-// ═══════════════════════════════════════════════════════════
-//  Platform Banner
-// ═══════════════════════════════════════════════════════════
-function renderPlatformBanner(client) {
-    if (!platformPillsEl) return;
-    const platforms = client.platforms || [];
-    platformPillsEl.innerHTML = platforms.map(p =>
-        p === 'SentinelOne'
-            ? `<span class="plat-pill plat-pill-s1"><span class="plat-dot"></span>SentinelOne</span>`
-            : `<span class="plat-pill plat-pill-av"><span class="plat-dot"></span>AlienVault</span>`
-    ).join(' ') || '—';
-    if (platformStatsEl) {
-        const av = client.av_total_alarms || 0;
-        const s1 = (client.recent_alerts||[]).filter(a => a.platform==='SentinelOne').length;
-        platformStatsEl.innerHTML =
-            (platforms.includes('SentinelOne') ? `<span class="platform-stat">S1 threats: <strong>${formatNumber(s1)}</strong></span>` : '') +
-            (platforms.includes('AlienVault')  ? `<span class="platform-stat">AV alarms: <strong>${formatNumber(av)}</strong></span>` : '');
-    }
-}
-
-
-// ═══════════════════════════════════════════════════════════
-//  Dashboard quick summaries
-// ═══════════════════════════════════════════════════════════
-function renderDashPrioSummary(rows) {
-    const el = document.getElementById('dash-prio-summary');
+// ═══════════════════════════════════════════════════════════════════════════
+//  Overview panels
+// ═══════════════════════════════════════════════════════════════════════════
+function renderDashPrio(rows) {
+    const el = $('dash-prio');
     if (!el) return;
-    if (!rows.length) { el.innerHTML = '<p style="color:var(--text-muted);font-size:.82rem;">No AV data available</p>'; return; }
-    el.innerHTML = rows.map(r =>
-        `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid rgba(0,0,0,.04);">
-            <span class="prio-badge prio-${r.priority.toLowerCase()}">${escHtml(r.priority)}</span>
-            <span style="font-size:.82rem;font-weight:700;">${formatNumber(r.total)}</span>
-            <span style="font-size:.72rem;color:var(--text-muted);">${r.statuses.open} open · ${r.statuses.closed} closed</span>
-         </div>`
-    ).join('');
+    if (!rows.length) { el.innerHTML = '<p style="color:#9CA3AF;font-size:.82rem;padding:8px 0;">No AV data available</p>'; return; }
+    el.innerHTML = rows.map(r => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid #F3F4F6;">
+            <span class="p-badge p-${r.priority.toLowerCase()}">${esc(r.priority)}</span>
+            <span style="font-weight:800;font-size:.9rem;">${fmt(r.total)}</span>
+            <span style="font-size:.72rem;color:#9CA3AF;">${r.statuses.open} open · ${r.statuses.closed} closed${r.statuses.in_review ? ' · '+r.statuses.in_review+' review' : ''}</span>
+        </div>`).join('');
 }
 
-function renderDashMethodSummary(rows) {
-    const el = document.getElementById('dash-method-summary');
+function renderDashMethods(rows) {
+    const el = $('dash-methods');
     if (!el) return;
-    if (!rows.length) { el.innerHTML = '<p style="color:var(--text-muted);font-size:.82rem;">No AV data available</p>'; return; }
+    if (!rows.length) { el.innerHTML = '<p style="color:#9CA3AF;font-size:.82rem;padding:8px 0;">No AV data available</p>'; return; }
     const max = rows[0]?.count || 1;
-    el.innerHTML = rows.slice(0,5).map(r =>
-        `<div style="padding:5px 0;border-bottom:1px solid rgba(0,0,0,.04);">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-                <span style="font-size:.8rem;font-weight:600;color:var(--text-primary);">${escHtml(r.method)}</span>
-                <span style="font-size:.75rem;font-weight:700;color:#F97316;">${formatNumber(r.count)}</span>
+    el.innerHTML = rows.slice(0,6).map(r => `
+        <div style="padding:6px 0;border-bottom:1px solid #F3F4F6;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                <span style="font-size:.8rem;font-weight:600;color:#111827;">${esc(r.method)}</span>
+                <span style="font-size:.78rem;font-weight:700;color:#C2410C;">${fmt(r.count)}</span>
             </div>
-            <div style="height:4px;border-radius:2px;background:rgba(249,115,22,.15);margin-top:4px;">
-                <div style="height:100%;border-radius:2px;background:#F97316;width:${Math.round((r.count/max)*100)}%;"></div>
+            <div style="height:4px;border-radius:2px;background:#F3F4F6;">
+                <div style="height:100%;border-radius:2px;background:#C2410C;width:${Math.round((r.count/max)*100)}%;"></div>
             </div>
-         </div>`
-    ).join('');
+        </div>`).join('');
 }
 
-
-// ═══════════════════════════════════════════════════════════
-//  Alerts Tab Renderers
-// ═══════════════════════════════════════════════════════════
-function renderAVTotal(total) {
-    const el = document.getElementById('av-total-count');
-    if (el) el.textContent = `${formatNumber(total)} alarms · 24hr window`;
-    const lt = document.getElementById('av-list-total');
-    if (lt) lt.textContent = formatNumber(total);
-}
-
-function renderPriorityTable(rows) {
-    if (!prioTbody) return;
-    if (!rows.length) {
-        prioTbody.innerHTML = '<tr><td colspan="3" style="color:var(--text-muted);padding:16px 8px;">No alarm data</td></tr>';
-        return;
-    }
-    prioTbody.innerHTML = rows.map(r => {
+// ═══════════════════════════════════════════════════════════════════════════
+//  Alerts Tab renderers
+// ═══════════════════════════════════════════════════════════════════════════
+function renderPrioTable(rows) {
+    const el = $('prio-tbody');
+    if (!el) return;
+    if (!rows.length) { el.innerHTML = '<tr><td colspan="3" class="empty-msg">No alarm data for this period</td></tr>'; return; }
+    el.innerHTML = rows.map(r => {
         const st = r.statuses || {};
         const chips = [
-            st.open     ? `<span class="status-chip chip-open">${st.open} Open</span>`     : '',
-            st.closed   ? `<span class="status-chip chip-closed">${st.closed} Closed</span>` : '',
-            st.in_review? `<span class="status-chip chip-review">${st.in_review} In Review</span>` : '',
-            st.other && st.other > 0 ? `<span class="status-chip chip-closed">${st.other} Other</span>` : '',
+            st.open      ? `<span class="chip chip-open">${st.open} Open</span>` : '',
+            st.closed    ? `<span class="chip chip-closed">${st.closed} Closed</span>` : '',
+            st.in_review ? `<span class="chip chip-review">${st.in_review} In Review</span>` : '',
         ].filter(Boolean).join('');
         return `<tr>
-            <td><span class="prio-badge prio-${r.priority.toLowerCase()}">${escHtml(r.priority)}</span></td>
-            <td style="font-weight:700;">${formatNumber(r.total)}</td>
-            <td><div class="status-sub">${chips}</div></td>
+            <td><span class="p-badge p-${r.priority.toLowerCase()}">${esc(r.priority)}</span></td>
+            <td style="font-weight:800;">${fmt(r.total)}</td>
+            <td><div class="chips">${chips || '<span style="color:#9CA3AF;font-size:.72rem;">—</span>'}</div></td>
         </tr>`;
     }).join('');
 }
 
-function renderMethodTable(rows) {
-    if (!methodTbody) return;
-    if (!rows.length) {
-        methodTbody.innerHTML = '<tr><td colspan="3" style="color:var(--text-muted);padding:16px 8px;">No data</td></tr>';
-        return;
-    }
+function renderMethTable(rows) {
+    const el = $('meth-tbody');
+    if (!el) return;
+    if (!rows.length) { el.innerHTML = '<tr><td colspan="3" class="empty-msg">No data</td></tr>'; return; }
     const max = rows[0]?.count || 1;
-    methodTbody.innerHTML = rows.slice(0, 15).map(r => `
+    el.innerHTML = rows.slice(0,15).map(r => `
         <tr>
-            <td><div style="font-weight:600;font-size:.8rem;">${escHtml(r.method)}</div>${r.strategy ? `<div class="intent-tag">Strategy: ${escHtml(r.strategy)}</div>` : ''}</td>
-            <td><span style="font-size:.75rem;color:var(--text-muted);">${escHtml(r.intent || '—')}</span></td>
+            <td><div style="font-weight:600;">${esc(r.method)}</div>${r.strategy ? `<div class="intent-sub">Strategy: ${esc(r.strategy)}</div>` : ''}</td>
+            <td><span class="intent-sub">${esc(r.intent || '—')}</span></td>
             <td style="text-align:right;">
-                <div class="count-bar-wrap" style="justify-content:flex-end;">
-                    <div class="count-bar" style="width:${Math.round((r.count/max)*60)}px;"></div>
-                    <strong style="font-size:.8rem;">${formatNumber(r.count)}</strong>
+                <div class="bar-wrap" style="justify-content:flex-end;">
+                    <div class="bar-bg" style="width:60px;"><div class="bar-fill" style="width:${Math.round((r.count/max)*100)}%;"></div></div>
+                    <span class="count-n">${fmt(r.count)}</span>
                 </div>
             </td>
-        </tr>`
-    ).join('');
+        </tr>`).join('');
 }
 
 function renderAssetTable(tbodyId, rows) {
-    const tbody = document.getElementById(tbodyId);
-    if (!tbody) return;
-    if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="3" style="color:var(--text-muted);padding:16px 8px;">No data</td></tr>';
-        return;
-    }
-    tbody.innerHTML = rows.map((r, i) => `
-        <tr>
-            <td><div class="asset-name">${i+1}. ${escHtml(r.asset)}</div></td>
-            <td><span class="count-pill">${formatNumber(r.count)}</span></td>
-            <td><div class="asset-tags">${(r.alarm_types||[]).map(t => escHtml(t)).join(', ') || '—'}</div></td>
-        </tr>`
-    ).join('');
-}
-
-function renderAlarmList(allAlerts) {
-    if (!alarmListTbody) return;
-    const avAlerts = allAlerts.filter(a => a.platform === 'AlienVault');
-    if (!avAlerts.length) {
-        alarmListTbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:32px;color:var(--text-muted);">No AlienVault alarms in the current window</td></tr>';
-        return;
-    }
-    alarmListTbody.innerHTML = avAlerts.map(a => {
-        const prio = (a.confidence || a.severity || 'low').toLowerCase();
-        const prioBadge = `<span class="prio-badge prio-${prio}">${escHtml(a.confidence || prio)}</span>`;
-        const st = a.status || 'Open';
-        const stClass = st === 'Open' ? 'av-st-open' : st === 'In Review' ? 'av-st-review' : 'av-st-closed';
-        const stBadge = `<span class="av-st-badge ${stClass}">${escHtml(st)}</span>`;
-        return `<tr>
-            <td>
-                <div class="alarm-name">${escHtml(a.alert_type || '—')}</div>
-                <div class="alarm-meta">${escHtml(a.intent || '')}${a.intent && a.strategy ? ' · ' : ''}${escHtml(a.strategy || '')}</div>
-                <div class="alarm-meta" style="margin-top:2px;">${escHtml(a.time || '')}</div>
-            </td>
-            <td>${prioBadge}</td>
-            <td>${stBadge}</td>
-            <td style="font-size:.8rem;">${escHtml(a.source || '—')}</td>
-            <td style="font-size:.8rem;color:var(--text-muted);">${escHtml(a.destination || '—')}</td>
-            <td style="font-size:.75rem;color:var(--text-muted);white-space:nowrap;">${escHtml(a.reported_at || a.time || '—')}</td>
-        </tr>`;
-    }).join('');
-}
-
-
-// ═══════════════════════════════════════════════════════════
-//  EDR (S1) Tab
-// ═══════════════════════════════════════════════════════════
-function renderS1ThreatCount(n) {
-    const el = document.getElementById('s1-threat-count');
-    if (el) el.textContent = `${formatNumber(n)} threats · 24hr window`;
-}
-
-function renderAlertsTable(alerts) {
-    if (!alertsTbody) return;
-    if (!alerts.length) {
-        alertsTbody.innerHTML = '<tr class="empty-row"><td colspan="7" style="text-align:center;padding:32px;">No SentinelOne threats in the current window</td></tr>';
-        return;
-    }
-    alertsTbody.innerHTML = alerts.map(a => {
-        const conf = (a.confidence||'').toLowerCase();
-        const confClass = conf==='malicious'?'conf-malicious':conf==='suspicious'?'conf-suspicious':'conf-unknown';
-        const verdictClass = a.analyst_verdict==='True Positive'?'verdict-tp':a.analyst_verdict==='False Positive'?'verdict-fp':a.analyst_verdict==='Suspicious'?'verdict-sus':'verdict-other';
-        const stClass = a.status==='Resolved'?'inc-resolved':a.status==='In Progress'?'inc-progress':a.status==='Unresolved'?'inc-unresolved':'inc-other';
-        return `<tr>
-            <td><strong class="threat-id">${escHtml(a.id)}</strong></td>
-            <td class="threat-details-cell">${escHtml(a.alert_type)} <span class="platform-chip platform-s1">S1</span></td>
-            <td><span class="conf-badge ${confClass}">${escHtml(a.confidence||'Unknown')}</span></td>
-            <td><span class="verdict-badge ${verdictClass}">${escHtml(a.analyst_verdict||'Pending')}</span></td>
-            <td><span class="inc-badge ${stClass}">${escHtml(a.status||'Unknown')}</span></td>
-            <td class="endpoint-name">${escHtml(a.source||'—')}</td>
-            <td class="reported-time">${escHtml(a.reported_at||a.time||'')}</td>
-        </tr>`;
-    }).join('');
-}
-
-
-// ═══════════════════════════════════════════════════════════
-//  System Status
-// ═══════════════════════════════════════════════════════════
-function updateSystemStatus(status) {
-    if (!systemStatusEl) return;
-    systemStatusEl.classList.remove('degraded','error');
-    const txt = systemStatusEl.querySelector('.status-text');
-    if (status==='degraded') { systemStatusEl.classList.add('degraded'); txt.textContent='Partial Connectivity'; }
-    else if (status==='error'||status==='unconfigured') { systemStatusEl.classList.add('error'); txt.textContent='Configuration Required'; }
-    else { txt.textContent='All System Operational'; }
-}
-
-
-// ═══════════════════════════════════════════════════════════
-//  KPI Animation
-// ═══════════════════════════════════════════════════════════
-const kpiAnimations = {};
-function animateKPI(id, target) {
-    const card = document.getElementById(id);
-    if (!card) return;
-    const el = card.querySelector('.kpi-value');
+    const el = $(tbodyId);
     if (!el) return;
-    const current = parseInt(el.dataset.target)||0;
-    el.dataset.target = target;
-    if (kpiAnimations[id]) cancelAnimationFrame(kpiAnimations[id]);
-    const start = performance.now();
+    if (!rows.length) { el.innerHTML = '<tr><td colspan="3" class="empty-msg">No data</td></tr>'; return; }
+    el.innerHTML = rows.map((r, i) => `
+        <tr>
+            <td><div class="asset-n">${i+1}. ${esc(r.asset)}</div></td>
+            <td><span class="cnt-lbl">${fmt(r.count)}</span></td>
+            <td><div class="asset-tags">${(r.alarm_types||[]).slice(0,2).map(t => esc(t)).join(', ') || '—'}</div></td>
+        </tr>`).join('');
+}
+
+function renderAlarmList(all) {
+    const el = $('alarm-tbody');
+    if (!el) return;
+    const avAlerts = all.filter(a => a.platform === 'AlienVault');
+    if (!avAlerts.length) { el.innerHTML = '<tr><td colspan="6" class="empty-msg">No AlienVault alarms in the current 24hr window</td></tr>'; return; }
+    el.innerHTML = avAlerts.map(a => {
+        const p = (a.confidence || a.severity || 'low').toLowerCase();
+        const st = a.status || 'Closed';
+        const stCls = st === 'Open' ? 'st-open' : st === 'In Review' ? 'st-review' : 'st-closed';
+        return `<tr>
+            <td><div class="alarm-n">${esc(a.alert_type || '—')}</div><div class="alarm-sub">${esc(a.intent || '')}${a.intent&&a.strategy?' · ':''}${esc(a.strategy||'')}</div></td>
+            <td><span class="p-badge p-${p}">${esc(a.confidence || p)}</span></td>
+            <td><span class="st-badge ${stCls}">${esc(st)}</span></td>
+            <td style="font-size:.8rem;">${esc(a.source||'—')}</td>
+            <td style="font-size:.8rem;color:#9CA3AF;">${esc(a.destination||'—')}</td>
+            <td style="font-size:.75rem;color:#9CA3AF;white-space:nowrap;">${esc(a.reported_at||a.time||'—')}</td>
+        </tr>`;
+    }).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  EDR Tab
+// ═══════════════════════════════════════════════════════════════════════════
+function renderS1Table(alerts) {
+    const el = $('s1-tbody');
+    if (!el) return;
+    if (!alerts.length) { el.innerHTML = '<tr><td colspan="6" class="empty-msg">No SentinelOne threats in the current 24hr window</td></tr>'; return; }
+    el.innerHTML = alerts.map(a => {
+        const conf = (a.confidence||'').toLowerCase();
+        const cCls = conf==='malicious'?'t-mal':conf==='suspicious'?'t-sus':'t-unk';
+        const vCls = a.analyst_verdict==='True Positive'?'v-tp':a.analyst_verdict==='False Positive'?'v-fp':'v-sus';
+        const iCls = a.status==='Resolved'?'i-res':a.status==='In Progress'?'i-prog':'i-open';
+        return `<tr>
+            <td><div class="alarm-n">${esc(a.alert_type||'—')}</div><div class="alarm-sub">${esc(a.id||'')}</div></td>
+            <td><span class="t-badge ${cCls}">${esc(a.confidence||'Unknown')}</span></td>
+            <td><span class="v-badge ${vCls}">${esc(a.analyst_verdict||'Pending')}</span></td>
+            <td><span class="i-badge ${iCls}">${esc(a.status||'Unknown')}</span></td>
+            <td style="font-size:.8rem;">${esc(a.source||'—')}</td>
+            <td style="font-size:.75rem;color:#9CA3AF;white-space:nowrap;">${esc(a.reported_at||a.time||'—')}</td>
+        </tr>`;
+    }).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  System status
+// ═══════════════════════════════════════════════════════════════════════════
+function updateStatus(st) {
+    const el = $('system-status'); if (!el) return;
+    el.classList.remove('degraded','error');
+    const txt = el.querySelector('.status-text');
+    if (st==='degraded') { el.classList.add('degraded'); txt.textContent='Partial Connectivity'; }
+    else if (st==='error'||st==='unconfigured') { el.classList.add('error'); txt.textContent='Configuration Required'; }
+    else if (txt) { txt.textContent='All Systems Operational'; }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Helpers
+// ═══════════════════════════════════════════════════════════════════════════
+const _kpiAnims = {};
+function animKPI(id, target) {
+    const el = $(id); if (!el) return;
+    const start = Number(el.dataset.val)||0;
+    el.dataset.val = target;
+    if (_kpiAnims[id]) cancelAnimationFrame(_kpiAnims[id]);
+    const t0 = performance.now();
     function step(now) {
-        const p = Math.min((now-start)/800,1);
-        const e = 1-Math.pow(1-p,3);
-        el.textContent = formatNumber(Math.round(current+(target-current)*e));
-        if (p<1) kpiAnimations[id] = requestAnimationFrame(step);
+        const p = Math.min((now-t0)/700, 1);
+        const e = 1 - Math.pow(1-p, 3);
+        el.textContent = fmt(Math.round(start + (target-start)*e));
+        if (p < 1) _kpiAnims[id] = requestAnimationFrame(step);
     }
-    kpiAnimations[id] = requestAnimationFrame(step);
+    _kpiAnims[id] = requestAnimationFrame(step);
 }
 
-
-// ═══════════════════════════════════════════════════════════
-//  Update timer
-// ═══════════════════════════════════════════════════════════
-function startUpdateTimer() {
-    if (updateTimerID) clearInterval(updateTimerID);
-    updateTimerID = setInterval(() => {
-        if (!lastUpdateTime||!lastUpdatedEl) return;
-        const s = Math.floor((Date.now()-lastUpdateTime.getTime())/1000);
-        lastUpdatedEl.textContent = s<5?'just now':s<60?`${s}s ago`:`${Math.floor(s/60)}m ago`;
-    }, 1000);
+function setBar(id, val, max) {
+    const el = $(id); if (!el) return;
+    el.style.width = Math.min(Math.round((val/Math.max(max,1))*100), 100) + '%';
 }
 
-
-// ═══════════════════════════════════════════════════════════
-//  Utilities
-// ═══════════════════════════════════════════════════════════
-function escHtml(str) {
-    if (!str) return '';
-    const d = document.createElement('div');
-    d.textContent = String(str);
-    return d.innerHTML;
-}
-
-function formatNumber(n) {
+function fmt(n) {
     n = Number(n)||0;
-    if (n>=1000000) return (n/1000000).toFixed(1)+'M';
-    if (n>=1000) return (n/1000).toFixed(1)+'k';
+    if (n>=1e6) return (n/1e6).toFixed(1)+'M';
+    if (n>=1e3) return (n/1e3).toFixed(1)+'k';
     return String(n);
 }
 
+function esc(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = String(s);
+    return d.innerHTML;
+}
 
-// ═══════════════════════════════════════════════════════════
+function startTimer() {
+    if (_updateTimer) clearInterval(_updateTimer);
+    _updateTimer = setInterval(() => {
+        if (!lastUpdateTime) return;
+        const s = Math.floor((Date.now()-lastUpdateTime.getTime())/1000);
+        const el = $('last-updated');
+        if (el) el.textContent = s<5?'just now':s<60?`${s}s ago`:`${Math.floor(s/60)}m ago`;
+    }, 1000);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  Bootstrap
-// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 document.addEventListener('DOMContentLoaded', async () => {
-    const navName = document.getElementById('nav-client-name');
-    if (navName && CLIENT_NAME.length > 14) { navName.textContent = CLIENT_NAME.substring(0,14)+'…'; navName.title = CLIENT_NAME; }
-    initEventChart();
-    initEDRChart();
-    await preloadClientData();
-    connectWebSocket();
+    const nn = $('nav-client-name');
+    if (nn && CLIENT_NAME.length > 14) { nn.textContent = CLIENT_NAME.substring(0,14)+'…'; nn.title = CLIENT_NAME; }
+    if (typeof initEventChart === 'function') initEventChart();
+    if (typeof initEDRChart   === 'function') initEDRChart();
+    await preload();
+    connectWS();
 });
