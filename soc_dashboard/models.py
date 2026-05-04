@@ -12,15 +12,19 @@ from datetime import datetime
 class AlertItem(BaseModel):
     """Single alert entry for the Recent Alerts table."""
     id: str = ""
-    alert_type: str = ""          # Threat file name
-    source: str = ""              # Endpoint / computer name
+    alert_type: str = ""          # Threat file name / alarm method
+    source: str = ""              # Endpoint / computer name / source IP
     severity: str = "low"         # malicious, suspicious, low
-    confidence: str = ""          # Malicious, Suspicious (AI confidence)
+    confidence: str = ""          # Malicious, Suspicious (AI confidence) / AV priority
     analyst_verdict: str = ""     # True Positive, False Positive, Suspicious
-    status: str = "open"          # unresolved, in_progress, resolved
+    status: str = "open"          # unresolved, in_progress, resolved / Open, Closed
     time: str = ""                # Relative time (e.g. 2h ago)
     reported_at: str = ""         # Exact reported timestamp
     platform: str = ""            # SentinelOne, AlienVault
+    # AV-specific extras
+    intent: str = ""              # AV rule_intent category
+    strategy: str = ""            # AV rule_strategy
+    destination: str = ""         # AV destination asset
 
 
 class TimePoint(BaseModel):
@@ -48,6 +52,41 @@ class PlatformStatus(BaseModel):
     blocked_attempts: int = 0
 
 
+# ── AV Alarm Breakdown Models ────────────────────────────────────────────────
+
+class AVStatusCount(BaseModel):
+    """Status counts within a priority group."""
+    open: int = 0
+    closed: int = 0
+    in_review: int = 0
+    other: int = 0
+
+
+class AVPriorityRow(BaseModel):
+    """Alarm count broken down by priority and status."""
+    priority: str           # High, Medium, Low, Critical
+    total: int = 0
+    statuses: AVStatusCount = Field(default_factory=AVStatusCount)
+    color: str = "#6B7280"  # display color
+
+
+class AVMethodRow(BaseModel):
+    """Alarm count by rule method/strategy (intent category)."""
+    method: str             # e.g. "C&C Communication Detected"
+    intent: str = ""        # e.g. "Delivery & Attack"
+    strategy: str = ""
+    count: int = 0
+
+
+class AVAssetRow(BaseModel):
+    """Asset with highest alarm activity (source or destination)."""
+    asset: str
+    count: int = 0
+    alarm_types: list[str] = Field(default_factory=list)  # top method names
+
+
+# ── Main Models ──────────────────────────────────────────────────────────────
+
 class ClientSummary(BaseModel):
     """Aggregated security data for a single client across all platforms."""
     name: str
@@ -69,6 +108,13 @@ class ClientSummary(BaseModel):
 
     # Per-platform detail
     platform_data: list[PlatformStatus] = Field(default_factory=list)
+
+    # ── AV Alarm Breakdowns (populated from full alarm list) ──
+    av_total_alarms: int = 0
+    av_priority_breakdown: list[AVPriorityRow] = Field(default_factory=list)
+    av_method_summary: list[AVMethodRow] = Field(default_factory=list)
+    av_top_sources: list[AVAssetRow] = Field(default_factory=list)
+    av_top_destinations: list[AVAssetRow] = Field(default_factory=list)
 
 
 class DashboardState(BaseModel):
