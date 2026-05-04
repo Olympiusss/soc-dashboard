@@ -4,19 +4,19 @@
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>{{ client_name }} — Sentrium SOC</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/css/dashboard.css?v=6">
+<link rel="stylesheet" href="/static/css/dashboard.css?v=7">
 <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.49.0/dist/apexcharts.min.js"></script>
 <style>
 /* ── Executive Variables ── */
 :root{
-  --exec-border:#E5E7EB;
-  --exec-card:#FFFFFF;
-  --exec-bg:#F3F4F6;
-  --exec-text:#111827;
-  --exec-muted:#6B7280;
-  --exec-accent:#1D4ED8;
-  --exec-radius:12px;
-  --exec-shadow:0 1px 4px rgba(0,0,0,.07),0 4px 16px rgba(0,0,0,.05);
+  --exec-border: var(--border-card);
+  --exec-card:   var(--bg-card);
+  --exec-bg:     var(--bg-main);
+  --exec-text:   var(--text-primary);
+  --exec-muted:  var(--text-muted);
+  --exec-accent: var(--accent-blue);
+  --exec-radius: var(--radius-lg);
+  --exec-shadow: var(--shadow-sm);
 }
 body{background:var(--exec-bg);}
 
@@ -70,10 +70,10 @@ body{background:var(--exec-bg);}
 .prio-tbl tr:last-child td{border-bottom:none;}
 .prio-tbl tbody tr:hover{background:#F9FAFB;}
 .p-badge{display:inline-block;padding:2px 10px;border-radius:5px;font-size:.72rem;font-weight:700;}
-.p-critical{background:#FEF2F2;color:#B91C1C;}
-.p-high{background:#FEF2F2;color:#DC2626;}
-.p-medium{background:#FFFBEB;color:#D97706;}
-.p-low{background:#F0FDF4;color:#15803D;}
+.p-critical{background:rgba(244,63,94,.15);color:#F43F5E;}
+.p-high{background:rgba(249,115,22,.15);color:#F97316;}
+.p-medium{background:rgba(251,191,36,.15);color:#FBBF24;}
+.p-low{background:rgba(52,211,153,.12);color:#34D399;}
 .chips{display:flex;gap:6px;flex-wrap:wrap;}
 .chip{font-size:.68rem;padding:2px 8px;border-radius:5px;font-weight:600;}
 .chip-open{background:#FEF2F2;color:#DC2626;}
