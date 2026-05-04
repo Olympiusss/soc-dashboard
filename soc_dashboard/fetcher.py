@@ -18,6 +18,7 @@ from config import settings
 from models import (
     DashboardState, ClientSummary, PlatformStatus,
     AlertItem, TimePoint, ThreatClassification,
+    AVPriorityRow, AVStatusCount, AVMethodRow, AVAssetRow,
 )
 
 logger = logging.getLogger("soc_dashboard.fetcher")
@@ -810,42 +811,156 @@ class DashboardAggregator:
         )
 
     def _build_av_summary(self, alarms: list[dict], events: list[dict], name: str) -> ClientSummary:
-        """Build client summary from AlienVault data."""
-        # Severity breakdown
-        severity_map = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-        for a in alarms:
-            label = str(a.get("priority_label", "")).lower()
-            if label in severity_map:
-                severity_map[label] += 1
+        """Build ClientSummary from AlienVault data — computes full breakdowns from ALL alarms."""
 
-        # Build classifications from rule methods
-        method_counter = Counter()
+        # ── Priority × Status breakdown ──────────────────────────────────
+        PRIORITY_COLORS = {
+            "critical": "#DC2626", "high": "#EF4444",
+            "medium": "#F59E0B",   "low": "#22C55E",
+        }
+        prio_map: dict[str, dict] = {}   # priority → {open, closed, in_review, other}
         for a in alarms:
+            prio = str(a.get("priority_label", "low")).lower()
+            if prio not in ("critical", "high", "medium", "low"):
+                prio = "low"
+            st = str(a.get("status", "")).lower()
+            if prio not in prio_map:
+                prio_map[prio] = {"open": 0, "closed": 0, "in_review": 0, "other": 0}
+            if st == "open":
+                prio_map[prio]["open"] += 1
+            elif st in ("closed", "resolved"):
+                prio_map[prio]["closed"] += 1
+            elif st in ("in_review", "investigating"):
+                prio_map[prio]["in_review"] += 1
+            else:
+                prio_map[prio]["other"] += 1
+
+        av_priority_breakdown = []
+        for prio in ("critical", "high", "medium", "low"):
+            if prio in prio_map:
+                counts = prio_map[prio]
+                total = sum(counts.values())
+                av_priority_breakdown.append(AVPriorityRow(
+                    priority=prio.capitalize(),
+                    total=total,
+                    statuses=AVStatusCount(
+                        open=counts["open"],
+                        closed=counts["closed"],
+                        in_review=counts["in_review"],
+                        other=counts["other"],
+                    ),
+                    color=PRIORITY_COLORS.get(prio, "#6B7280"),
+                ))
+
+        # ── Method / Intent / Strategy breakdown ─────────────────────────
+        method_counter: dict[str, dict] = {}   # method → {count, intent, strategy}
+        for a in alarms:
+            method   = a.get("rule_method", "") or a.get("method", "") or "Unknown"
+            intent   = a.get("rule_intent", "") or a.get("intent", "") or ""
+            strategy = a.get("rule_strategy", "") or a.get("strategy", "") or ""
+            key = method
+            if key not in method_counter:
+                method_counter[key] = {"count": 0, "intent": intent, "strategy": strategy}
+            method_counter[key]["count"] += 1
+
+        av_method_summary = [
+            AVMethodRow(
+                method=m,
+                intent=d["intent"],
+                strategy=d["strategy"],
+                count=d["count"],
+            )
+            for m, d in sorted(method_counter.items(), key=lambda x: -x[1]["count"])
+        ][:20]
+
+        # ── Top 5 Sources ─────────────────────────────────────────────────
+        source_counter: dict[str, Counter] = {}
+        for a in alarms:
+            src = a.get("source_name", "") or a.get("src_ip", "") or ""
+            if not src:
+                continue
             method = a.get("rule_method", "Unknown")
-            if method:
-                method_counter[method] += 1
+            if src not in source_counter:
+                source_counter[src] = Counter()
+            source_counter[src][method] += 1
 
+        av_top_sources = [
+            AVAssetRow(
+                asset=src,
+                count=sum(c.values()),
+                alarm_types=list(dict(c.most_common(3)).keys()),
+            )
+            for src, c in sorted(source_counter.items(), key=lambda x: -sum(x[1].values()))
+        ][:5]
+
+        # ── Top 5 Destinations ────────────────────────────────────────────
+        dest_counter: dict[str, Counter] = {}
+        for a in alarms:
+            dst = a.get("destination_name", "") or a.get("dst_ip", "") or ""
+            if not dst:
+                continue
+            method = a.get("rule_method", "Unknown")
+            if dst not in dest_counter:
+                dest_counter[dst] = Counter()
+            dest_counter[dst][method] += 1
+
+        av_top_destinations = [
+            AVAssetRow(
+                asset=dst,
+                count=sum(c.values()),
+                alarm_types=list(dict(c.most_common(3)).keys()),
+            )
+            for dst, c in sorted(dest_counter.items(), key=lambda x: -sum(x[1].values()))
+        ][:5]
+
+        # ── Severity KPIs ─────────────────────────────────────────────────
+        severity_map = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        for r in av_priority_breakdown:
+            severity_map[r.priority.lower()] = r.total
+
+        # ── Classifications (for pie chart) ──────────────────────────────
+        intent_counter: Counter = Counter()
+        for a in alarms:
+            intent = a.get("rule_intent", "") or a.get("intent", "Other")
+            if intent:
+                intent_counter[intent] += 1
+
+        INTENT_COLORS = {
+            "System Compromise":         "#DC2626",
+            "Exploitation & Installation":"#EF4444",
+            "Delivery & Attack":          "#F97316",
+            "Reconnaissance & Probing":   "#F59E0B",
+            "Environmental Awareness":    "#3B82F6",
+        }
         classifications = [
-            ThreatClassification(name=name, count=count, color="#F97316")
-            for name, count in method_counter.most_common(5)
+            ThreatClassification(
+                name=intent,
+                count=count,
+                color=INTENT_COLORS.get(intent, "#6B7280"),
+            )
+            for intent, count in intent_counter.most_common(5)
         ]
 
-        # Recent alerts — store up to 50 for the per-client detail view
+        # ── Recent alerts (50 most recent for the table) ──────────────────
         recent_alerts = []
         for a in alarms[:50]:
-            sev_label = str(a.get("priority_label", "medium")).lower()
-            if sev_label not in ("critical", "high", "medium", "low"):
-                sev_label = "medium"
+            prio_label = str(a.get("priority_label", "low")).lower()
+            if prio_label not in ("critical", "high", "medium", "low"):
+                prio_label = "low"
             ts_ms = a.get("timestamp_occured") or a.get("timestamp_received")
             recent_alerts.append(AlertItem(
                 id=f"AV-{str(a.get('uuid', ''))[:6]}",
                 alert_type=a.get("rule_method", a.get("rule_intent", "Alarm")),
-                source=a.get("source_name", a.get("sensor", "AlienVault")),
-                severity=sev_label,
-                confidence=str(a.get("priority_label", "")).title() or "Unknown",
-                status="Open" if a.get("status") == "open" else "Closed",
+                source=a.get("source_name", a.get("sensor", "")),
+                destination=a.get("destination_name", ""),
+                severity=prio_label,
+                confidence=prio_label.capitalize(),
+                status="Open" if a.get("status") == "open" else
+                       "In Review" if a.get("status") in ("in_review", "investigating") else "Closed",
                 time=_format_timestamp_ms(ts_ms),
                 reported_at=_format_exact_time_ms(ts_ms),
+                intent=a.get("rule_intent", ""),
+                strategy=a.get("rule_strategy", ""),
                 platform="AlienVault",
             ))
 
@@ -861,6 +976,11 @@ class DashboardAggregator:
             threat_classifications=classifications,
             recent_alerts=recent_alerts,
             event_timeline=[],
+            av_total_alarms=len(alarms),
+            av_priority_breakdown=av_priority_breakdown,
+            av_method_summary=av_method_summary,
+            av_top_sources=av_top_sources,
+            av_top_destinations=av_top_destinations,
             platform_data=[
                 PlatformStatus(
                     platform="AlienVault",
@@ -873,6 +993,7 @@ class DashboardAggregator:
                 ),
             ],
         )
+
 
     def _build_global_timeline(self, clients: list[ClientSummary]) -> list[TimePoint]:
         """Merge all client timelines into a global 24hr timeline."""
