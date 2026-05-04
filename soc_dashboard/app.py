@@ -219,6 +219,36 @@ async def api_state(request: Request):
     return JSONResponse({"error": "No data yet. Waiting for first fetch cycle."}, status_code=503)
 
 
+@app.get("/api/client/{client_name}/data")
+async def api_client_data(request: Request, client_name: str):
+    """Return full ClientSummary for a specific client by name."""
+    if not _is_authenticated(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    from urllib.parse import unquote
+    name = unquote(client_name).lower()
+
+    state = aggregator.cached_state
+    if not state:
+        return JSONResponse({"error": "No data yet"}, status_code=503)
+
+    client = next(
+        (c for c in state.clients if c.name.lower() == name),
+        None
+    )
+    if not client:
+        # Partial match fallback
+        client = next(
+            (c for c in state.clients if name in c.name.lower() or c.name.lower() in name),
+            None
+        )
+
+    if not client:
+        return JSONResponse({"error": f"Client '{client_name}' not found"}, status_code=404)
+
+    return JSONResponse(client.model_dump())
+
+
 @app.get("/api/health")
 async def health():
     """Health check endpoint."""
@@ -233,28 +263,27 @@ async def health():
 @app.get("/api/debug/av")
 async def debug_av(request: Request):
     """
-    DEBUG ONLY: Fetch raw AlienVault sensors and first 5 alarms.
-    Shows the exact JSON fields returned by AV so we can fix the mapping.
-    Remove this endpoint after field names are confirmed.
+    DEBUG: Shows raw AlienVault deployments + alarms to diagnose field mapping.
+    Hit this URL after logging in to see exactly what AV returns.
     """
     if not _is_authenticated(request):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
-        sensors = await aggregator.av.fetch_sensors()
-        alarms  = await aggregator.av.fetch_alarms(days_back=1)
+        deployments = await aggregator.av.fetch_deployments()
+        alarms      = await aggregator.av.fetch_alarms(days_back=1)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-    # Return the first 5 alarms in full so we can see every field
-    sample_alarms = alarms[:5] if alarms else []
+    sample_alarms = alarms[:3] if alarms else []
 
     return JSONResponse({
-        "sensor_count": len(sensors),
-        "alarm_count":  len(alarms),
-        "sensors_sample": sensors[:5],
-        "alarms_sample":  sample_alarms,
-        "alarm_keys": list(sample_alarms[0].keys()) if sample_alarms else [],
+        "av_base_url":        aggregator.av.base_url,
+        "deployment_count":  len(deployments),
+        "deployments_raw":   deployments[:5],
+        "alarm_count":       len(alarms),
+        "alarm_keys":        list(sample_alarms[0].keys()) if sample_alarms else [],
+        "alarms_sample":     sample_alarms,
     })
 
 
