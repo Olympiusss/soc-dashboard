@@ -830,20 +830,22 @@ class DashboardAggregator:
             for name, count in method_counter.most_common(5)
         ]
 
-        # Recent alerts
+        # Recent alerts — store up to 50 for the per-client detail view
         recent_alerts = []
-        for a in alarms[:10]:
+        for a in alarms[:50]:
             sev_label = str(a.get("priority_label", "medium")).lower()
             if sev_label not in ("critical", "high", "medium", "low"):
                 sev_label = "medium"
-
+            ts_ms = a.get("timestamp_occured") or a.get("timestamp_received")
             recent_alerts.append(AlertItem(
                 id=f"AV-{str(a.get('uuid', ''))[:6]}",
-                alert_type=a.get("rule_method", "Alarm"),
+                alert_type=a.get("rule_method", a.get("rule_intent", "Alarm")),
                 source=a.get("source_name", a.get("sensor", "AlienVault")),
                 severity=sev_label,
-                time=_format_timestamp_ms(a.get("timestamp_received")),
-                status="active" if a.get("status") == "open" else "investigating",
+                confidence=str(a.get("priority_label", "")).title() or "Unknown",
+                status="Open" if a.get("status") == "open" else "Closed",
+                time=_format_timestamp_ms(ts_ms),
+                reported_at=_format_exact_time_ms(ts_ms),
                 platform="AlienVault",
             ))
 
@@ -944,6 +946,17 @@ def _format_exact_time(iso_str: str) -> str:
         return f"{month} {day}{suffix} {dt.year} • {dt.strftime('%H:%M')}"
     except Exception:
         return iso_str[:16] if len(iso_str) > 16 else iso_str
+
+def _format_exact_time_ms(ts_ms) -> str:
+    """Format millisecond epoch timestamp as 'Apr 13th 2026 • 20:03'."""
+    if not ts_ms:
+        return ""
+    try:
+        dt = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc)
+        return _format_exact_time(dt.isoformat())
+    except Exception:
+        return ""
+
 
 def _build_hourly_timeline(threats: list[dict]) -> list[TimePoint]:
     """Build 24-hour timeline from threat data."""
