@@ -190,11 +190,12 @@ function renderPrioTable(rows) {
 function renderMethTable(rows) {
     const el = $('meth-tbody');
     if (!el) return;
-    if (!rows.length) { el.innerHTML = '<tr><td colspan="3" class="empty-msg">No data</td></tr>'; return; }
+    if (!rows.length) { el.innerHTML = '<tr><td colspan="4" class="empty-msg">No data</td></tr>'; return; }
     const max = rows[0]?.count || 1;
     el.innerHTML = rows.slice(0,15).map(r => `
         <tr>
-            <td><div style="font-weight:600;">${esc(r.method)}</div>${r.strategy ? `<div class="intent-sub">Strategy: ${esc(r.strategy)}</div>` : ''}</td>
+            <td style="font-weight:600;font-size:.83rem;">${esc(r.method)}</td>
+            <td><span class="intent-sub">${esc(r.strategy || '—')}</span></td>
             <td><span class="intent-sub">${esc(r.intent || '—')}</span></td>
             <td style="text-align:right;">
                 <div class="bar-wrap" style="justify-content:flex-end;">
